@@ -1,0 +1,17 @@
+name: Group selector verification
+
+on:
+  push:
+    branches:
+      - verify/group-selector-queries
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    uses: ./.github/workflows/_quality.yml
+    with:
+      ref: 13a527060c7d2a4ea19438bd5b78c762cd3d48cf
+      run_backend: true
+      run_frontend: false
