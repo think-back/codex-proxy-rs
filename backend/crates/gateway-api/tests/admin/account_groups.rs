@@ -68,7 +68,7 @@ async fn options_route_should_return_only_lightweight_group_fields() {
         json!({
             "id": PRIMARY_GROUP_ID,
             "name": "Alpha routing",
-            "color": "#2563EBCC",
+            "color": "#2563EBFF",
             "enabled": true
         })
     );
