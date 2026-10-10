@@ -267,7 +267,9 @@ HTTP 传输不加密，公网部署仍建议使用 HTTPS。
 
 流式响应在首个上游事件提交后，每 15 秒无输出会发送一次 SSE 注释保活，
 并设置 `X-Accel-Buffering: no` 和 `Cache-Control: no-cache, no-transform`。
-反向代理仍需允许这些响应头生效；首个事件到达前的等待也需要足够的读取超时
+反向代理仍需允许这些响应头生效；首个事件到达前的等待也需要足够的读取超时。
+调用方有固定读取超时时，可设置 `openai.first_output_timeout_ms`，
+让 OpenAI 请求在首个有效输出前到期即返回 504；默认 `0` 不限制
 
 网关默认不限制模型请求的总执行时长；OpenAI 上游流默认有 300 秒空闲超时。
 `api.request_timeout_seconds` 默认 `null`，只控制 HTTP 路由返回响应前的等待，不是流式正文或 WebSocket 每轮执行的总时限。

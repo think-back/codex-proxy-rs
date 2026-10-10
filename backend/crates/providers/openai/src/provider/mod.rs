@@ -157,6 +157,7 @@ pub struct CodexProvider {
     session_identity: Option<CodexSessionIdentity>,
     session_transport_recovery: CodexSessionTransportRecovery,
     stream_max_retries: u32,
+    first_output_timeout: Option<Duration>,
     live_registry: Arc<CodexLiveRegistry>,
     live_gateway: Option<Arc<CodexLiveGateway>>,
 }
@@ -329,6 +330,7 @@ impl CodexProvider {
             session_identity: None,
             session_transport_recovery: CodexSessionTransportRecovery::default(),
             stream_max_retries,
+            first_output_timeout: None,
             live_registry: Arc::new(CodexLiveRegistry::default()),
             live_gateway: None,
         })
@@ -340,6 +342,13 @@ impl CodexProvider {
         timezone: gateway_core::time::DeploymentTimeZone,
     ) -> Self {
         self.client = self.client.with_timezone(timezone);
+        self
+    }
+
+    /// 设置首个有效输出前的等待上限；None 保持只受请求期限和传输超时约束
+    #[must_use]
+    pub fn with_first_output_timeout(mut self, timeout: Option<Duration>) -> Self {
+        self.first_output_timeout = timeout;
         self
     }
 
@@ -1039,6 +1048,7 @@ impl CodexProvider {
             session_transport_recovery: self.session_transport_recovery.clone(),
             websocket_retry_count,
             stream_max_retries: self.stream_max_retries,
+            first_output_timeout: self.first_output_timeout,
             session_capture,
         });
         let stream = ProviderStream::new(metadata, events, lease);

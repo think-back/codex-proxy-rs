@@ -41,6 +41,9 @@ pub struct OpenAiConfig {
     pub auth: CodexAuthSettings,
     #[serde(default = "default_stream_max_retries")]
     pub stream_max_retries: u64,
+    /// 首个有效输出前的最长等待毫秒数；0 表示不限制
+    #[serde(default)]
+    pub first_output_timeout_ms: u64,
     #[serde(default)]
     pub residency: Option<CodexResidency>,
     #[serde(skip)]
@@ -107,6 +110,13 @@ impl OpenAiConfig {
             .unwrap_or(MAX_STREAM_MAX_RETRIES as u32)
     }
 
+    /// 返回首个有效输出前的等待上限；未配置时只受请求期限和传输超时约束
+    #[must_use]
+    pub fn first_output_timeout(&self) -> Option<Duration> {
+        (self.first_output_timeout_ms != 0)
+            .then(|| Duration::from_millis(self.first_output_timeout_ms))
+    }
+
     pub(crate) fn session_identity(
         &self,
     ) -> Result<CodexSessionIdentity, CodexSessionIdentityError> {
@@ -123,6 +133,7 @@ impl Default for OpenAiConfig {
             quota: CodexQuotaSettings::default(),
             auth: CodexAuthSettings::default(),
             stream_max_retries: DEFAULT_STREAM_MAX_RETRIES,
+            first_output_timeout_ms: 0,
             residency: None,
             identity_secret_path: PathBuf::new(),
         }

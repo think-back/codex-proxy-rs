@@ -436,8 +436,10 @@ xAI 的 `reasoning.effort` 接受 `none / minimal / low / medium / high / xhigh 
 #### 容量拒绝与重试
 
 OpenAI Responses 的 `response.created`、`response.in_progress` 等前导事件保留到首次有效文本、
-推理、工具活动或终态再交付，SSE 与 WebSocket 使用相同边界。前导缓冲不另设等待时长或累计体积上限，
-等待沿用[请求期限](#请求期限)与传输超时配置。WebSocket 独立 Ping 保活；
+推理、工具活动或终态再交付，SSE 与 WebSocket 使用相同边界。前导缓冲不另设累计体积上限，
+等待沿用[请求期限](#请求期限)与传输超时配置。配置 `openai.first_output_timeout_ms` 后从请求开始计时，
+到期仍未交付时丢弃前导事件并以 504 `request_timeout` 结束本次请求，不做重试或换号；默认 `0` 不限制。
+WebSocket 独立 Ping 保活；
 HTTP 在首个业务事件前保留状态码和响应头，SSE 注释保活从提交响应后开始
 
 WebSocket 在交付有效输出前断线或超时，可按 `stream_max_retries` 做同账号、有退避的尽力重试

@@ -394,6 +394,7 @@ pub(super) struct ColdResponse {
     pub(super) session_transport_recovery: CodexSessionTransportRecovery,
     pub(super) websocket_retry_count: u32,
     pub(super) stream_max_retries: u32,
+    pub(super) first_output_timeout: Option<Duration>,
     pub(super) session_capture: Option<OpenAiSessionCapture>,
 }
 
@@ -532,6 +533,7 @@ pub(super) enum CodexHandshakeAttemptError {
     Client(CodexClientError),
     Cancelled,
     Timeout,
+    FirstOutputTimeout,
 }
 
 pub(super) async fn create_response_attempt(
@@ -540,6 +542,7 @@ pub(super) async fn create_response_attempt(
     request_context: CodexRequestContext<'_>,
     account_id: &str,
     deadline: gateway_core::lifecycle::Deadline,
+    first_output_deadline: Option<tokio::time::Instant>,
     cancellation: &CancellationToken,
 ) -> Result<CodexBackendStreamingResponse, CodexHandshakeAttemptError> {
     if deadline.is_elapsed() {
@@ -549,11 +552,23 @@ pub(super) async fn create_response_attempt(
         biased;
         _ = cancellation.cancelled() => Err(CodexHandshakeAttemptError::Cancelled),
         _ = deadline.wait() => Err(CodexHandshakeAttemptError::Timeout),
+        // WebSocket 握手会等到前导帧之后的首个事件才返回，期限需覆盖这一段
+        () = first_output_deadline_elapsed(first_output_deadline) => {
+            Err(CodexHandshakeAttemptError::FirstOutputTimeout)
+        }
         response = client.create_response_stream_with_pool_account(
             request,
             request_context,
             Some(account_id),
         ) => response.map_err(CodexHandshakeAttemptError::Client),
+    }
+}
+
+/// 未配置首个有效输出期限时永不触发
+async fn first_output_deadline_elapsed(deadline: Option<tokio::time::Instant>) {
+    match deadline {
+        Some(deadline) => tokio::time::sleep_until(deadline).await,
+        None => std::future::pending().await,
     }
 }
 
@@ -570,6 +585,10 @@ pub(super) fn map_handshake_attempt_error(
             ProviderErrorKind::Timeout,
             UpstreamSendState::Ambiguous,
         )),
+        // 请求已发出，上游可能仍在思考，不做重放
+        CodexHandshakeAttemptError::FirstOutputTimeout => MappedProviderFailure::plain(
+            provider_error(ProviderErrorKind::Timeout, UpstreamSendState::Sent),
+        ),
     }
 }
 
@@ -776,6 +795,7 @@ pub(super) fn cold_response_stream(response: ColdResponse) -> EventStream {
         session_transport_recovery,
         websocket_retry_count,
         stream_max_retries,
+        first_output_timeout,
         mut session_capture,
     } = response;
     Box::pin(async_stream::try_stream! {
@@ -810,6 +830,10 @@ pub(super) fn cold_response_stream(response: ColdResponse) -> EventStream {
         );
         let request_transport_requirement = transport_requirement(&request);
         let trace = context.trace();
+        // 从请求开始计时，与客户端感知的等待一致；提交后不再生效
+        let first_output_deadline = first_output_timeout.map(|timeout| {
+            tokio::time::Instant::from_std(context.timing_started_at() + timeout)
+        });
         let response = create_response_attempt(
             &client,
             &request,
@@ -824,9 +848,18 @@ pub(super) fn cold_response_stream(response: ColdResponse) -> EventStream {
             ).with_trace(&trace),
             active_account.id().as_str(),
             context.deadline(),
+            first_output_deadline,
             &cancellation,
         )
         .await;
+        if matches!(response, Err(CodexHandshakeAttemptError::FirstOutputTimeout))
+            && trace.is_enabled()
+        {
+            trace.record(
+                "provider.precommit.timeout",
+                json!({"waitMs": context.timing_started_at().elapsed().as_millis()}),
+            );
+        }
         let websocket_failure_policy = match &response {
             Err(CodexHandshakeAttemptError::Client(error))
                 if transport_policy == CodexProviderTransport::PreferWebSocket =>
@@ -975,6 +1008,16 @@ pub(super) fn cold_response_stream(response: ColdResponse) -> EventStream {
                     ProviderErrorKind::Timeout,
                     UpstreamSendState::Sent,
                 ))),
+                () = first_output_deadline_elapsed(first_output_deadline),
+                    if !pre_commit_events.is_committed() =>
+                {
+                    // 上游可能仍在思考，已发送请求不做重放，避免重复执行
+                    pre_commit_events.expire();
+                    Err(MappedProviderFailure::plain(provider_error(
+                        ProviderErrorKind::Timeout,
+                        UpstreamSendState::Sent,
+                    )))
+                }
                 chunk = body.next() => match chunk {
                     Some(Ok(chunk)) => Ok(Some(chunk)),
                     Some(Err(error)) => {

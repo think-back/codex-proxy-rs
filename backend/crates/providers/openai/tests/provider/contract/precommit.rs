@@ -1,4 +1,4 @@
-//! 验证结构事件缓冲、长时间等待与取消对重试边界的影响
+//! 验证结构事件缓冲、首个有效输出期限、长时间等待与取消对重试边界的影响
 
 use gateway_core::diagnostics::TraceContext;
 use gateway_core::engine::provider::ProviderStream;
@@ -470,4 +470,115 @@ async fn websocket_disconnect_recovery_honors_request_retry_budget_without_sessi
         }
         server.await.unwrap();
     }
+}
+
+fn provider_with_first_output_timeout(
+    store: &Arc<MemoryAccountStore>,
+    base_url: String,
+    timeout: Duration,
+) -> Arc<CodexProvider> {
+    let provider = Arc::into_inner(provider_with_base_url(store, base_url)).unwrap();
+    Arc::new(provider.with_first_output_timeout(Some(timeout)))
+}
+
+fn first_output_timeouts(trace: &TraceContext) -> Vec<Value> {
+    trace.snapshot().unwrap()["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|event| event["stage"] == "provider.precommit.timeout")
+        .cloned()
+        .collect()
+}
+
+#[tokio::test]
+async fn first_output_timeout_fails_structural_preamble_without_release_or_replay() {
+    for websocket in [false, true] {
+        let store = Arc::new(MemoryAccountStore::default());
+        create_account(&store, "acct_provider_contract").await;
+        let created = structural_event("response.created", 1024);
+        let (base_url, release, server) = if websocket {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let base_url = format!("http://{}", listener.local_addr().unwrap());
+            let (release, released) = oneshot::channel::<()>();
+            let server = tokio::spawn(async move {
+                let (socket, _) = listener.accept().await.unwrap();
+                let mut ws = accept_codex_test_websocket(socket).await;
+                ws.next().await.unwrap().unwrap();
+                ws.send(Message::Text(created.to_string().into()))
+                    .await
+                    .unwrap();
+                let _ = released.await;
+            });
+            (base_url, release, server)
+        } else {
+            let (base_url, release, _, server) =
+                paused_chunked_sse_server(sse(&created), String::new()).await;
+            (base_url, release, server)
+        };
+        let trace = TraceContext::new("req_precommit");
+        let operation = if websocket {
+            generate_operation()
+        } else {
+            http_generate_operation()
+        };
+        let mut stream =
+            provider_with_first_output_timeout(&store, base_url, Duration::from_millis(300))
+                .execute(
+                    planned_request("openai", operation),
+                    traced_context(&trace, CancellationToken::new()),
+                )
+                .await
+                .unwrap();
+
+        let (events, error) = timeout(Duration::from_secs(2), stream_failure(&mut stream))
+            .await
+            .unwrap();
+        assert_eq!(error.kind(), ProviderErrorKind::Timeout);
+        assert_eq!(error.send_state(), UpstreamSendState::Sent);
+        assert!(!error.replay_is_safe());
+        assert_eq!(error.pre_delivery_retry(), None);
+        assert!(events.iter().all(|event| !event.has_client_event()));
+        assert!(releases(&trace).is_empty());
+        assert_eq!(first_output_timeouts(&trace).len(), 1);
+        let _ = release.send(());
+        server.await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn first_output_timeout_does_not_apply_after_semantic_output() {
+    let store = Arc::new(MemoryAccountStore::default());
+    create_account(&store, "acct_provider_contract").await;
+    let semantic = json!({"type": "response.output_text.delta", "output_index": 0, "content_index": 0, "delta": "hello"});
+    let terminal = json!({"type": "response.completed", "response": {"id": "resp_precommit", "model": "gpt-5.4", "status": "completed", "output": []}});
+    let (base_url, release, _, server) = paused_chunked_sse_server(
+        sse(&structural_event("response.created", 1024)) + &sse(&semantic),
+        sse(&terminal),
+    )
+    .await;
+    let trace = TraceContext::new("req_precommit");
+    let mut stream =
+        provider_with_first_output_timeout(&store, base_url, Duration::from_millis(300))
+            .execute(
+                planned_request("openai", http_generate_operation()),
+                traced_context(&trace, CancellationToken::new()),
+            )
+            .await
+            .unwrap();
+    timeout(Duration::from_secs(1), next_client_event(&mut stream))
+        .await
+        .unwrap();
+    // 已交付有效输出后超过期限，仍按原有等待规则继续读取
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    release.send(()).unwrap();
+    while let Some(event) = timeout(Duration::from_secs(1), stream.next())
+        .await
+        .unwrap()
+    {
+        event.unwrap();
+    }
+    assert!(first_output_timeouts(&trace).is_empty());
+    assert_eq!(releases(&trace).len(), 1);
+    server.await.unwrap();
 }

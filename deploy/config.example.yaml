@@ -76,6 +76,8 @@ api:
 openai:
   # 数据驻留约束；省略或 null 不指定地域约束，与管理端客户端身份无关。
   residency: us
+  # 首个有效输出前的最长等待毫秒数，到期返回 504；0 不限制。
+  first_output_timeout_ms: 0
 
 # Compose 启动桥接区；密码仍只维护在 store 中。
 services:

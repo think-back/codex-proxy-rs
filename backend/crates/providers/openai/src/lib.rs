@@ -186,6 +186,7 @@ pub async fn initialize(
         )
         .map_err(OpenAiInitializeError::Provider)?
         .with_session_identity(session_identity)
+        .with_first_output_timeout(config.first_output_timeout())
         .with_timezone(config.timezone)
         .with_live_support(repository.clone()),
     );

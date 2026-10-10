@@ -158,6 +158,21 @@ impl PreCommitClientEvents {
         self.committed
     }
 
+    /// 首个有效输出期限到期时丢弃前导事件，诊断与正常释放区分
+    pub(super) fn expire(&mut self) {
+        if self.trace.is_enabled() {
+            self.trace.record(
+                "provider.precommit.timeout",
+                json!({
+                    "prefetchedBytes": self.prefetched_bytes,
+                    "waitMs": self.started_at.elapsed().as_millis(),
+                }),
+            );
+        }
+        self.prefetched_bytes = 0;
+        self.pending.clear();
+    }
+
     pub(super) fn commit_pending(&mut self, reason: PreCommitReleaseReason) -> Vec<ProviderEvent> {
         // Provider 只记录释放缓存的原因；实际下游提交仍由 Core 记录和裁决
         if self.trace.is_enabled() {

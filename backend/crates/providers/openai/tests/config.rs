@@ -115,6 +115,18 @@ fn openai_stream_retry_budget_uses_the_official_hard_cap() {
     );
 }
 
+#[test]
+fn openai_first_output_timeout_is_disabled_unless_configured() {
+    let mut config = OpenAiConfig::default();
+    assert_eq!(config.first_output_timeout(), None);
+
+    config.first_output_timeout_ms = 60_000;
+    assert_eq!(
+        config.first_output_timeout(),
+        Some(std::time::Duration::from_secs(60))
+    );
+}
+
 fn valid_config() -> OpenAiConfig {
     OpenAiConfig::default()
 }
