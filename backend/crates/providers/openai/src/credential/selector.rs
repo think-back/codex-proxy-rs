@@ -624,8 +624,8 @@ impl CodexCredentialSelector {
                 if request.requires_websocket
                     && pinned_account.as_ref().is_none_or(|id| id == account.id())
                 {
-                    let runtime = match self.repository.load_runtime_credential(&account).await {
-                        Ok(runtime) => runtime,
+                    let runtime = match self.repository.reload_selected_credential(&account).await {
+                        Ok((_, runtime)) => runtime,
                         Err(CredentialRepositoryError::RevisionConflict(_)) => {
                             retry_account_snapshot(
                                 request.attempt,
@@ -907,10 +907,15 @@ impl CodexCredentialSelector {
                     .find(|candidate| candidate.account.id() == selected.account.id())
                     .map(|candidate| candidate.account.clone())
                     .ok_or(CredentialSelectionError::InvalidCredential(None))?;
-                // 额度观测等并发更新会使整个账号快照失效，必须重新选号并校验资格
+                // 凭据、状态或额度结论的并发更新会使账号快照失效，必须重新选号并校验资格；
+                // 仅额度观测时刻前进时沿用最新快照
                 // 在占用租约和请求间隔前完成校验，避免重读被自己的异步释放挡住
-                let runtime = match self.repository.load_runtime_credential(&account).await {
-                    Ok(runtime) => runtime,
+                let (account, runtime) = match self
+                    .repository
+                    .reload_selected_credential(&account)
+                    .await
+                {
+                    Ok(reloaded) => reloaded,
                     Err(CredentialRepositoryError::RevisionConflict(_)) => {
                         retry_account_snapshot(request.attempt, &account, &mut snapshot_retries)?;
                         continue 'capacity;

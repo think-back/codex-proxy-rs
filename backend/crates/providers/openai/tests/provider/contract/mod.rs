@@ -2329,7 +2329,11 @@ async fn quota_snapshot_race_reloads_and_sends_the_request_once() {
         .await
         .expect("concurrent quota observation must not fail prepare");
     assert_eq!(stream.metadata().provider_account_id(), original.id());
-    assert_eq!(store.credential_loads(), 2);
+    assert_eq!(
+        store.credential_loads(),
+        1,
+        "observation-only quota updates must not restart selection"
+    );
     assert_eq!(leases.requests.lock().expect("leases").len(), 1);
     let mut completed = false;
     while let Some(event) = stream.next().await {
@@ -2476,19 +2480,7 @@ async fn repeated_snapshot_conflicts_are_bounded_and_report_the_selection_stage(
     store.on_credential_load(Arc::new(|store, id, count| {
         Box::pin(async move {
             assert!(count <= 4, "snapshot conflict retries must be bounded");
-            let account = store.account(id.as_str()).expect("account");
-            let observed_at = account
-                .quota()
-                .observed_at()
-                .unwrap_or_else(SystemTime::now)
-                + Duration::from_millis(1);
-            store
-                .apply_quota_access(QuotaAccessChange {
-                    account_id: id.clone(),
-                    expected_revision: account.revision(),
-                    state: QuotaState::allowed(observed_at),
-                })
-                .await?;
+            bump_account_weight(store, id, count);
             Ok(())
         })
     }));
@@ -2547,19 +2539,7 @@ async fn api_websocket_precheck_and_selection_share_the_snapshot_retry_budget() 
             );
             // 第 1、4 次在传输预检冲突，第 3、6 次在最终候选校验冲突
             if matches!(count, 1 | 3 | 4 | 6) {
-                let account = store.account(id.as_str()).expect("account");
-                let observed_at = account
-                    .quota()
-                    .observed_at()
-                    .unwrap_or_else(SystemTime::now)
-                    + Duration::from_millis(1);
-                store
-                    .apply_quota_access(QuotaAccessChange {
-                        account_id: id.clone(),
-                        expected_revision: account.revision(),
-                        state: QuotaState::allowed(observed_at),
-                    })
-                    .await?;
+                bump_account_weight(store, id, count);
             }
             Ok(())
         })
@@ -2606,6 +2586,15 @@ async fn api_websocket_precheck_and_selection_share_the_snapshot_retry_budget() 
             .await
             .expect("requests")
             .is_empty()
+    );
+}
+
+// 调度权重属于选号事实，每次变化都必须让已选快照失效
+fn bump_account_weight(store: &MemoryAccountStore, id: &ProviderAccountId, count: usize) {
+    store.set_scheduling(
+        id.as_str(),
+        None,
+        AccountWeight::new(u16::try_from(count + 1).expect("small count")).expect("weight"),
     );
 }
 

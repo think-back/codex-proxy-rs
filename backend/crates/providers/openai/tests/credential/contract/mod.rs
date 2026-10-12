@@ -537,7 +537,11 @@ fn selector_reloads_quota_snapshot_before_acquiring_the_only_lease() {
         selected.account(),
         &store.account("acct_primary").expect("current account")
     );
-    assert_eq!(store.credential_loads(), 2);
+    assert_eq!(
+        store.credential_loads(),
+        1,
+        "observation-only quota updates must not restart selection"
+    );
     let requests = leases.requests.lock().expect("lease requests");
     assert_eq!(
         requests.len(),
@@ -546,6 +550,52 @@ fn selector_reloads_quota_snapshot_before_acquiring_the_only_lease() {
     );
     assert_eq!(requests[0].max_concurrent().get(), 1);
     assert_eq!(requests[0].request_interval(), Duration::from_millis(10));
+}
+
+#[test]
+fn selector_rejects_quota_exhaustion_observed_after_selection() {
+    let store = Arc::new(MemoryAccountStore::default());
+    create_account(&store, "acct_primary", "at-primary");
+    let original = store.account("acct_primary").expect("account");
+    block_on(store.apply_quota_access(QuotaAccessChange {
+        account_id: original.id().clone(),
+        expected_revision: original.revision(),
+        state: QuotaState::allowed(SystemTime::now()),
+    }))
+    .expect("initial quota observation");
+    store.on_credential_load(Arc::new(|store, id, count| {
+        Box::pin(async move {
+            if count == 1 {
+                let account = store.account(id.as_str()).expect("account");
+                store
+                    .apply_quota_access(QuotaAccessChange {
+                        account_id: id.clone(),
+                        expected_revision: account.revision(),
+                        state: QuotaState::exhausted(
+                            QuotaEvidence::UsageLimitReached,
+                            SystemTime::now(),
+                            None,
+                        ),
+                    })
+                    .await?;
+            }
+            Ok(())
+        })
+    }));
+    let leases = Arc::new(TestLeaseCoordinator::default());
+    let selector = selector(&store, Arc::clone(&leases));
+    let attempt = attempt(BTreeSet::new());
+    let error = block_on(selector.select(&SelectCodexCredential {
+        upstream_model: "gpt-5.4",
+        request_url: &Url::parse("https://chatgpt.com/backend-api/codex/responses").expect("URL"),
+        attempt: &attempt,
+        session_affinity_key: None,
+    }))
+    .expect_err("quota exhaustion must still invalidate the selected snapshot");
+
+    assert!(matches!(error, CredentialSelectionError::QuotaExhausted));
+    assert_eq!(store.credential_loads(), 1);
+    assert!(leases.requests.lock().expect("lease requests").is_empty());
 }
 
 #[test]
