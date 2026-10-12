@@ -897,7 +897,7 @@ async fn worker_skips_locked_versions_and_preserves_a_concurrent_source_deletion
 }
 
 #[tokio::test]
-async fn committed_queue_versions_abort_old_ack_and_replay_without_losing_contributions() {
+async fn committed_queue_versions_skip_old_ack_and_replay_without_losing_contributions() {
     use sqlx::Connection;
     for backfill in [false, true] {
         let Some(database) = TestDatabase::create("analytics_committed_ack").await else {
@@ -948,32 +948,15 @@ async fn committed_queue_versions_abort_old_ack_and_replay_without_losing_contri
             .execute(&mut publication)
             .await
             .unwrap();
-        let error = running
+        // 已提交的新版本不能让整批投影回滚，旧版本 ACK 不匹配并保留给下一轮重放
+        let maintenance = running
             .await
             .unwrap()
-            .expect_err("RR cannot acknowledge a queue row changed after its snapshot");
-        let gateway_store::StoreError::Unavailable {
-            message,
-            source: Some(source),
-            ..
-        } = error
-        else {
-            panic!("expected a PostgreSQL serialization failure");
-        };
-        assert_eq!(message, "confirm analytics request versions");
-        assert_eq!(
-            source
-                .downcast_ref::<sqlx::Error>()
-                .expect("preserve original sqlx error")
-                .as_database_error()
-                .expect("preserve PostgreSQL error")
-                .code()
-                .as_deref(),
-            Some("40001")
-        );
+            .expect("committed queue versions cannot abort the projected batch");
+        assert_eq!(maintenance.projected_requests, 1);
         let preserved: (i64, i64) = sqlx::query_as("select pending.change_version,facts.total_tokens from request_analytics_pending_requests pending join request_analytics_facts facts on facts.id=pending.request_id where pending.request_id='committed_ack'")
             .fetch_one(&database.pool).await.unwrap();
-        assert_eq!(preserved, (committed_version, 120));
+        assert_eq!(preserved, (committed_version, 240));
         drain_analytics(&database.pool).await;
         let summary = observability_repository(&database.pool)
             .usage_summary(

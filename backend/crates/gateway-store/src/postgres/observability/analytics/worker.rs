@@ -97,11 +97,16 @@ impl PgRequestAnalyticsRepository {
             if result.projected_requests + result.backfilled_requests > 0 {
                 publish_generation(&mut transaction, true).await?;
             }
+            transaction.commit().await.map_err(|error| postgres_unavailable("publish analytics maintenance", error))?;
+            // 快照后提交的源版本会让 RR 下的行锁直接序列化失败，持续写入时整批投影会反复回滚
+            // ACK 在投影提交后使用 READ COMMITTED，行锁按最新提交版本重新比较，已改写的版本不再匹配
+            let mut transaction = connection.begin().await.map_err(|error| postgres_unavailable("begin analytics acknowledgement", error))?;
+            sqlx::query("set local statement_timeout = '10s'").execute(&mut *transaction).await.map_err(|error| postgres_unavailable("set analytics query deadline", error))?;
             // 源删除会持有队列行再修改 generation，ACK 不能等待这些源事务形成反向锁依赖
             // 被跳过的版本保留在持久队列中重放，只有精确匹配且已取得行锁的版本才确认
             sqlx::query("with acknowledged as materialized (select pending.request_id,pending.change_version from request_analytics_pending_requests pending join unnest($1::text[],$2::bigint[]) job(id,version) on pending.request_id=job.id and pending.change_version=job.version for update of pending skip locked) delete from request_analytics_pending_requests pending using acknowledged where pending.request_id=acknowledged.request_id and pending.change_version=acknowledged.change_version")
                 .bind(ids).bind(versions).execute(&mut *transaction).await.map_err(|error| postgres_unavailable("confirm analytics request versions", error))?;
-            transaction.commit().await.map_err(|error| postgres_unavailable("publish analytics maintenance", error))?;
+            transaction.commit().await.map_err(|error| postgres_unavailable("complete analytics acknowledgement", error))?;
             // 每个阶段使用独立短事务，聚合只锁自己的队列，不把读放大传递到请求终结
             let mut transaction = begin_snapshot(&mut connection).await?;
             let acquired: bool = sqlx::query_scalar("select pg_try_advisory_xact_lock(hashtextextended(current_schema()::text,382032))")
