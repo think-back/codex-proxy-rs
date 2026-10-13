@@ -1318,11 +1318,11 @@ async fn account_usage_merges_model_summaries_beyond_the_fact_row_budget() {
         .bind(start).execute(&database.pool).await.unwrap();
     sqlx::query("insert into model_requests(id,client_api_key_ref,operation,client_transport,provider_kind,provider_account_ref,requested_model_id,upstream_model_id,outcome,client_status_code,cost_source,started_at,recovery_lease_expires_at,completed_at,request_observation_json) values('budget_failed','key_budget','responses','http_sse','openai','acct_budget','public-model','model_a','failed',502,'unavailable',$1+interval '30 minutes',$1+interval '3 hours',$1+interval '31 minutes','{\"request\":{\"configRevision\":1,\"protocol\":\"openai\",\"endpoint\":\"/v1/responses\",\"compact\":false},\"routing\":{\"scope\":\"all\",\"groupRefs\":[],\"groupNamesSnapshot\":[]}}'::jsonb)")
         .bind(start).execute(&database.pool).await.unwrap();
-    // 共享 drain 每轮最多投影一千条，超过预算的输入需要更大的批次
+    // 共享 drain 最多维护一百轮，超过预算的输入沿用同一批次并增加轮数
     let worker =
         PgRequestAnalyticsRepository::new(database.pool.clone(), observability_query_budget());
-    for _ in 0..100 {
-        worker.maintain(10_000).await.unwrap();
+    for _ in 0..1000 {
+        worker.maintain(1000).await.unwrap();
         let status = worker.status().await.unwrap();
         if !status.building && status.pending_requests == 0 && status.pending_buckets == 0 {
             break;
