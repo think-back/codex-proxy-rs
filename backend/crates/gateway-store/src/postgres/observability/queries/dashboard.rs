@@ -2,14 +2,6 @@
 
 use super::super::*;
 
-pub(crate) fn coverage_from_row(row: &sqlx::postgres::PgRow) -> StoreResult<CostCoverage> {
-    Ok(CostCoverage {
-        provider_reported_count: unsigned(row, "provider_reported_count")?,
-        calculated_count: unsigned(row, "calculated_count")?,
-        unavailable_count: unsigned(row, "unavailable_count")?,
-    })
-}
-
 pub(crate) fn fill_metric_gaps(
     range: ObservabilityRange,
     granularity: ObservationGranularity,

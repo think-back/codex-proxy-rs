@@ -322,7 +322,7 @@ pub(super) fn collections(
             .map(|value| value.to_string())
             .unwrap_or_default())
     };
-    Ok(vec![
+    let mut collections = vec![
         ("global", vec![]),
         (
             "provider_model",
@@ -347,7 +347,28 @@ pub(super) fn collections(
             ],
         ),
         ("failure", vec![text("error_kind")?]),
-    ])
+    ];
+    if let Some(dimensions) = account_model_dimensions(row)? {
+        collections.push((ACCOUNT_MODEL_COLLECTION, dimensions));
+    }
+    Ok(collections)
+}
+
+/// 账号用量按模型拆分且只含完成用量，单独成集合避免为失败请求增加账号与模型组合
+/// 模型沿用上游优先、请求模型兜底的展示口径，两者都缺失时为空串，只计入账号合计
+pub(super) fn account_model_dimensions(
+    row: &sqlx::postgres::PgRow,
+) -> StoreResult<Option<Vec<String>>> {
+    if !get::<bool>(row, "is_completed_usage")? {
+        return Ok(None);
+    }
+    let model = get::<Option<String>>(row, "upstream_model_id")?
+        .or(get::<Option<String>>(row, "requested_model_id")?)
+        .unwrap_or_default();
+    Ok(Some(vec![
+        get::<Option<String>>(row, "provider_account_ref")?.unwrap_or_default(),
+        model,
+    ]))
 }
 
 struct ProjectionJob {

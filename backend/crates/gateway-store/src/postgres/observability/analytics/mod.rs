@@ -1,5 +1,6 @@
 //! 请求观测的持久化投影、可重建汇总与受预算约束的读取
 
+mod accounts;
 mod buckets;
 mod histogram;
 mod metrics;
@@ -13,9 +14,10 @@ pub use worker::{AnalyticsMaintenance, AnalyticsStatus, PgRequestAnalyticsReposi
 use super::*;
 use metrics::MetricState;
 
-const SCHEMA_VERSION: i32 = 1;
+const SCHEMA_VERSION: i32 = 2;
 const HISTOGRAM_VERSION: i32 = histogram::HISTOGRAM_VERSION;
 const MAX_FACT_ROWS: usize = 100_000;
+const ACCOUNT_MODEL_COLLECTION: &str = "account_model";
 
 pub(super) async fn begin_snapshot(
     connection: &mut PgConnection,

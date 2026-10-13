@@ -47,6 +47,9 @@ impl MetricState {
     pub fn count(&self, name: &str) -> u64 {
         self.counts.get(name).copied().unwrap_or_default()
     }
+    pub fn known_count(&self, name: &str) -> Option<u64> {
+        self.counts.get(name).copied()
+    }
     fn increment(&mut self, name: &str, amount: u64) -> StoreResult<()> {
         let count = self.counts.entry(name.to_owned()).or_default();
         *count = count
@@ -185,6 +188,13 @@ impl MetricState {
             self.sample("capacity", Some(used as f64 / total as f64 * 10_000.0))?;
         }
         if completed {
+            // 账号用量只统计完成用量，失败请求的计数不能代替账号卡片的调用次数
+            self.increment("completed_request_count", 1)?;
+            match get::<Option<bool>>(row, "image_generation_succeeded")? {
+                Some(true) => self.increment("image_request_count", 1)?,
+                Some(false) => self.increment("image_request_failed_count", 1)?,
+                None => {}
+            }
             for name in [
                 "input_tokens",
                 "output_tokens",
@@ -195,7 +205,10 @@ impl MetricState {
                 "image_input_tokens",
                 "image_output_tokens",
             ] {
-                self.increment(name, optional_unsigned(row, name)?.unwrap_or_default())?;
+                // 只有出现过上游值才保留计数键，账号用量据此区分零 Token 与未知 Token
+                if let Some(value) = optional_unsigned(row, name)? {
+                    self.increment(name, value)?;
+                }
             }
             if get::<Option<i64>>(row, "input_tokens")?.is_some() {
                 self.increment("cache_eligible_request_count", 1)?;

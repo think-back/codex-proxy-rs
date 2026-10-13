@@ -197,7 +197,7 @@ impl PgObservabilityRepository {
                         )
                         .await?;
                     let account_usage =
-                        provider_account_usage(&mut snapshot.tx, account_usage_query).await?;
+                        snapshot.provider_account_usage(account_usage_query).await?;
                     let metadata = snapshot.metadata();
                     snapshot.finish().await?;
                     Ok((totals, trend, metadata, account_usage))
@@ -319,11 +319,7 @@ impl PgObservabilityRepository {
                 "load provider account usage",
                 |mut connection| async move {
                     let mut snapshot = analytics::AnalyticsSnapshot::new(&mut connection).await?;
-                    snapshot.require_visible(Some(query.range)).await?;
-                    if let Some(range) = query.request_bucket_range {
-                        snapshot.require_visible(Some(range)).await?;
-                    }
-                    let usage = provider_account_usage(&mut snapshot.tx, query).await?;
+                    let usage = snapshot.provider_account_usage(query).await?;
                     snapshot.finish().await?;
                     Ok(usage)
                 },

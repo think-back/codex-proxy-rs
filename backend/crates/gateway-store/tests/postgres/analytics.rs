@@ -316,7 +316,7 @@ async fn obsolete_projection_versions_rebuild_from_source_without_double_countin
     let rebuilt = repo.usage_summary(range, Default::default()).await.unwrap();
     assert_eq!(rebuilt.requests.request_count, 2);
     assert_eq!(rebuilt.requests.total_tokens, 360);
-    assert_eq!(rebuilt.analytics.schema_version, 1);
+    assert_eq!(rebuilt.analytics.schema_version, 2);
     assert_eq!(rebuilt.analytics.histogram_version, 1);
     database.close().await;
 }
@@ -331,7 +331,7 @@ async fn high_cardinality_diagnostics_rank_whole_range_before_loading_distributi
         .unwrap()
         .with_timezone(&Utc);
     // 超过在线汇总行预算的高基数输入仍只返回全范围排名后的两个组
-    sqlx::query("insert into request_analytics_hourly(bucket_start,collection,dimensions,outcome,schema_version,histogram_version,counts,costs,distributions) select $1::timestamptz + hour*interval '1 hour','key',array['key_'||lpad(account::text,4,'0')],'succeeded',1,1,jsonb_build_object('request_count',case when account=1200 then 2 else 1 end),'{}','{}' from generate_series(0,99) hour cross join generate_series(1,1200) account")
+    sqlx::query("insert into request_analytics_hourly(bucket_start,collection,dimensions,outcome,schema_version,histogram_version,counts,costs,distributions) select $1::timestamptz + hour*interval '1 hour','key',array['key_'||lpad(account::text,4,'0')],'succeeded',2,1,jsonb_build_object('request_count',case when account=1200 then 2 else 1 end),'{}','{}' from generate_series(0,99) hour cross join generate_series(1,1200) account")
         .bind(start).execute(&database.pool).await.unwrap();
     let result = observability_repository(&database.pool)
         .usage_diagnostics(
@@ -563,7 +563,8 @@ async fn backfill_coverage_uses_contiguous_cursor_instead_of_old_corrected_facts
         .unwrap();
     let worker =
         PgRequestAnalyticsRepository::new(database.pool.clone(), observability_query_budget());
-    worker.maintain(2).await.unwrap();
+    // 新库的统计版本来自迁移默认值，先完成空表的版本重置再观察回填
+    while worker.maintain(2).await.unwrap().reset_progress {}
     let status = worker.status().await.unwrap();
     assert!(status.building);
     assert_eq!(
@@ -1298,5 +1299,89 @@ async fn daily_rank_counts_follow_rebuilds_rollbacks_deletions_and_dirty_days() 
         .unwrap();
     assert_eq!(dirty.total_request_count, 2);
     assert_eq!(dirty.items[0].request_count, 2);
+    database.close().await;
+}
+
+#[tokio::test]
+async fn account_usage_merges_model_summaries_beyond_the_fact_row_budget() {
+    use gateway_store::postgres::ProviderAccountUsageQuery;
+    let Some(database) = TestDatabase::create("analytics_account_usage_budget").await else {
+        return;
+    };
+    let start = DateTime::parse_from_rfc3339("2026-09-01T00:00:00Z")
+        .unwrap()
+        .with_timezone(&Utc);
+    sqlx::query("insert into provider_accounts(id,provider_kind,name,email,upstream_user_id,plan_type,authentication_kind,provider_credentials_json,credential_revision,has_refresh_token,enabled,credential_state,credential_observed_at,created_at,updated_at) values('acct_budget','openai','budget','budget@example.invalid','user-budget','pro','oauth','{}'::jsonb,1,false,true,'ready',$1,$1,$1)")
+        .bind(start).execute(&database.pool).await.unwrap();
+    // 超过窄事实预算的完成用量分布在两个模型，另有一个失败请求不得计入账号用量
+    sqlx::query("insert into model_requests(id,client_api_key_ref,operation,client_transport,provider_kind,provider_account_ref,requested_model_id,upstream_model_id,outcome,client_status_code,downstream_committed_at,input_tokens,output_tokens,total_tokens,cost_source,cost_amount,cost_currency,started_at,recovery_lease_expires_at,completed_at,request_observation_json) select 'budget_'||i,'key_budget','responses','http_sse','openai','acct_budget','public-model',case when i%4=0 then 'model_b' else 'model_a' end,'succeeded',200,$1+(i%7200)*interval '1 second',10,2,12,'provider_reported',0.01,'USD',$1+(i%7200)*interval '1 second',$1+interval '3 hours',$1+(i%7200)*interval '1 second','{\"request\":{\"configRevision\":1,\"protocol\":\"openai\",\"endpoint\":\"/v1/responses\",\"compact\":false},\"routing\":{\"scope\":\"all\",\"groupRefs\":[],\"groupNamesSnapshot\":[]}}'::jsonb from generate_series(1,120000) i")
+        .bind(start).execute(&database.pool).await.unwrap();
+    sqlx::query("insert into model_requests(id,client_api_key_ref,operation,client_transport,provider_kind,provider_account_ref,requested_model_id,upstream_model_id,outcome,client_status_code,cost_source,started_at,recovery_lease_expires_at,completed_at,request_observation_json) values('budget_failed','key_budget','responses','http_sse','openai','acct_budget','public-model','model_a','failed',502,'unavailable',$1+interval '30 minutes',$1+interval '3 hours',$1+interval '31 minutes','{\"request\":{\"configRevision\":1,\"protocol\":\"openai\",\"endpoint\":\"/v1/responses\",\"compact\":false},\"routing\":{\"scope\":\"all\",\"groupRefs\":[],\"groupNamesSnapshot\":[]}}'::jsonb)")
+        .bind(start).execute(&database.pool).await.unwrap();
+    // 共享 drain 每轮最多投影一千条，超过预算的输入需要更大的批次
+    let worker =
+        PgRequestAnalyticsRepository::new(database.pool.clone(), observability_query_budget());
+    for _ in 0..100 {
+        worker.maintain(10_000).await.unwrap();
+        let status = worker.status().await.unwrap();
+        if !status.building && status.pending_requests == 0 && status.pending_buckets == 0 {
+            break;
+        }
+    }
+    let repo = observability_repository(&database.pool);
+    let query = |range| {
+        ProviderAccountUsageQuery::for_accounts(range, vec!["acct_budget".to_owned()]).unwrap()
+    };
+    let aligned = ObservabilityRange::new(start, start + TimeDelta::hours(2)).unwrap();
+    let usage = repo.provider_account_usage(query(aligned)).await.unwrap();
+    assert_eq!(usage.len(), 1);
+    let account = &usage[0];
+    assert_eq!(
+        (
+            account.request_count,
+            account.success_count,
+            account.total_tokens
+        ),
+        (120000, 120000, Some(1_440_000))
+    );
+    assert_eq!(
+        account.costs[0].amount.as_str().parse::<f64>().unwrap(),
+        1200.0
+    );
+    assert_eq!(account.cost_coverage.provider_reported_count, 120000);
+    assert_eq!(
+        account
+            .models
+            .iter()
+            .map(|model| (model.model.as_str(), model.request_count))
+            .collect::<Vec<_>>(),
+        vec![("model_a", 90000), ("model_b", 30000)]
+    );
+    let latest = start + TimeDelta::seconds(7199);
+    assert_eq!(account.last_used_at, Some(latest));
+    assert!(account.models.iter().all(|model| model.last_used_at
+        >= start + TimeDelta::seconds(7196)
+        && model.last_used_at <= latest));
+
+    // 非整桶边界只读首尾窄事实，与完整桶互斥合并
+    let partial = ObservabilityRange::new(
+        start + TimeDelta::minutes(5),
+        start + TimeDelta::minutes(95),
+    )
+    .unwrap();
+    let usage = repo.provider_account_usage(query(partial)).await.unwrap();
+    assert_eq!(usage[0].request_count, 90901);
+    let hourly = repo
+        .provider_account_usage(query(aligned).with_hourly_request_buckets().unwrap())
+        .await
+        .unwrap();
+    assert_eq!(
+        hourly[0]
+            .request_buckets
+            .iter()
+            .map(|bucket| bucket.request_count)
+            .sum::<u64>(),
+        120000
+    );
     database.close().await;
 }

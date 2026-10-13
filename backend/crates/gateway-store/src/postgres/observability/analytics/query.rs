@@ -476,7 +476,7 @@ impl<'a> AnalyticsSnapshot<'a> {
         Ok((total, keys))
     }
 
-    async fn summary_buckets(
+    pub(super) async fn summary_buckets(
         &mut self,
         range: ObservabilityRange,
         use_hourly: bool,
@@ -502,7 +502,7 @@ impl<'a> AnalyticsSnapshot<'a> {
         Ok((hours, quarters))
     }
 
-    async fn uncovered_spans(
+    pub(super) async fn uncovered_spans(
         &mut self,
         range: ObservabilityRange,
     ) -> StoreResult<Vec<(DateTime<Utc>, DateTime<Utc>)>> {
@@ -784,7 +784,7 @@ impl<'a> AnalyticsSnapshot<'a> {
     }
 }
 
-fn push_summary_buckets(
+pub(super) fn push_summary_buckets(
     query: &mut QueryBuilder<Postgres>,
     buckets: &[DateTime<Utc>],
     seconds: i64,

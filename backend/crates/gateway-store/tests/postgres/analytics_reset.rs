@@ -123,7 +123,7 @@ async fn version_reset_persists_primary_keys_atomically_and_resumes_after_table_
     let result = repo.usage_summary(range, Default::default()).await.unwrap();
     assert_eq!(result.requests.request_count, 6);
     assert_eq!(result.requests.total_tokens, 840);
-    assert_eq!(result.analytics.schema_version, 1);
+    assert_eq!(result.analytics.schema_version, 2);
     assert_eq!(result.analytics.histogram_version, 1);
     database.close().await;
 }
