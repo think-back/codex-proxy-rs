@@ -5842,20 +5842,10 @@ fn connection_recovery_keeps_one_account_and_http_transport_until_success() {
         )
         .with_connection_retry(AttemptTransport::Fallback))],
     };
-    // 单账号部署中排除唯一账号后选不到账号，Provider 返回 NoEligibleAccount
-    let no_other_account = || {
-        Script::Error(ProviderError::new(
-            ProviderErrorKind::NoEligibleAccount,
-            UpstreamSendState::NotSent,
-        ))
-    };
     let (coordinator, store, provider) = coordinator(vec![
         failure(),
-        no_other_account(),
         failure(),
-        no_other_account(),
         failure(),
-        no_other_account(),
         Script::Stream {
             account_id: "acct_only",
             items: complete_stream(None),
@@ -5873,17 +5863,12 @@ fn connection_recovery_keeps_one_account_and_http_transport_until_success() {
     block_on(session.collect_uncommitted()).unwrap();
     block_on(session.commit_downstream(Some(200))).unwrap();
     let contexts = provider.contexts.lock().unwrap();
-    assert_eq!(contexts.len(), 7);
+    assert_eq!(contexts.len(), 4);
     let account = ProviderAccountId::new("acct_only").unwrap();
-    // 每次建连失败先尝试换号，选不到其他账号后回到同账号 HTTP 恢复
-    for index in [1, 3, 5] {
-        assert!(contexts[index].required_account().is_none());
-        assert!(contexts[index].excluded_accounts().contains(&account));
-    }
-    for index in [2, 4, 6] {
-        assert_eq!(contexts[index].required_account(), Some(&account));
-        assert_eq!(contexts[index].transport(), AttemptTransport::Fallback);
-        assert!(!contexts[index].excluded_accounts().contains(&account));
+    for context in contexts.iter().skip(1) {
+        assert_eq!(context.required_account(), Some(&account));
+        assert_eq!(context.transport(), AttemptTransport::Fallback);
+        assert!(!context.excluded_accounts().contains(&account));
     }
     let state = store.state.lock().unwrap();
     assert_eq!(state.intermediate_failures, 3);
@@ -5894,7 +5879,7 @@ fn connection_recovery_keeps_one_account_and_http_transport_until_success() {
 }
 
 #[test]
-fn connection_failure_rotates_to_another_account() {
+fn connection_recovery_does_not_delay_existing_account_rotation() {
     let operation = generate_operation();
     let route_plan = plan(&operation);
     let (coordinator, store, provider) = coordinator(vec![
@@ -5905,6 +5890,15 @@ fn connection_failure_rotates_to_another_account() {
                 UpstreamSendState::NotSent,
             )
             .with_connection_retry(AttemptTransport::Fallback))],
+        },
+        Script::Stream {
+            account_id: "acct_first",
+            items: vec![Err(ProviderError::new(
+                ProviderErrorKind::RateLimited,
+                UpstreamSendState::Sent,
+            )
+            .with_status(429)
+            .with_replay_safe())],
         },
         Script::Stream {
             account_id: "acct_second",
@@ -5923,14 +5917,21 @@ fn connection_failure_rotates_to_another_account() {
     block_on(session.collect_uncommitted()).unwrap();
     block_on(session.commit_downstream(Some(200))).unwrap();
     let contexts = provider.contexts.lock().unwrap();
-    assert_eq!(contexts.len(), 2);
+    assert_eq!(contexts.len(), 3);
     let first = ProviderAccountId::new("acct_first").unwrap();
-    // 建连失败后排除原账号重新选号，不再钉住原出口
-    assert!(contexts[1].required_account().is_none());
-    assert!(contexts[1].excluded_accounts().contains(&first));
+    // 临时建连失败先在原账号恢复，后续明确可重放的限流拒绝仍按已有规则换号
+    assert_eq!(contexts[1].required_account(), Some(&first));
+    assert_eq!(contexts[1].transport(), AttemptTransport::Fallback);
+    assert!(!contexts[1].excluded_accounts().contains(&first));
+    assert!(contexts[2].required_account().is_none());
+    assert_eq!(contexts[2].transport(), AttemptTransport::Default);
+    assert!(contexts[2].excluded_accounts().contains(&first));
     let state = store.state.lock().unwrap();
-    assert_eq!(state.intermediate_failures, 1);
+    assert_eq!(state.intermediate_failures, 2);
     assert_eq!(state.finalizations[0].outcome, ExecutionOutcome::Succeeded);
+    assert_eq!(provider.released_leases.load(Ordering::SeqCst), 2);
+    drop(session);
+    assert_eq!(provider.released_leases.load(Ordering::SeqCst), 3);
 }
 
 #[test]
@@ -6052,12 +6053,11 @@ fn connection_backoff_cancellation_releases_account_without_another_attempt() {
         .with_connection_retry(AttemptTransport::Fallback))],
     }]);
     let cancellation = CancellationToken::new();
-    // 指定账号保持同账号建连恢复，取消发生在退避等待中
     let mut session = block_on(coordinator.start(
         model_request(&operation, SystemTime::now() + Duration::from_secs(30)),
         operation,
         route_plan,
-        Some(ProviderAccountId::new("acct_first").expect("account id")),
+        None,
         None,
         cancellation.clone(),
     ))
