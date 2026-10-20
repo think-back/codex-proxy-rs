@@ -5842,10 +5842,20 @@ fn connection_recovery_keeps_one_account_and_http_transport_until_success() {
         )
         .with_connection_retry(AttemptTransport::Fallback))],
     };
+    // 单账号部署中排除唯一账号后选不到账号，Provider 返回 NoEligibleAccount
+    let no_other_account = || {
+        Script::Error(ProviderError::new(
+            ProviderErrorKind::NoEligibleAccount,
+            UpstreamSendState::NotSent,
+        ))
+    };
     let (coordinator, store, provider) = coordinator(vec![
         failure(),
+        no_other_account(),
         failure(),
+        no_other_account(),
         failure(),
+        no_other_account(),
         Script::Stream {
             account_id: "acct_only",
             items: complete_stream(None),
@@ -5863,12 +5873,17 @@ fn connection_recovery_keeps_one_account_and_http_transport_until_success() {
     block_on(session.collect_uncommitted()).unwrap();
     block_on(session.commit_downstream(Some(200))).unwrap();
     let contexts = provider.contexts.lock().unwrap();
-    assert_eq!(contexts.len(), 4);
+    assert_eq!(contexts.len(), 7);
     let account = ProviderAccountId::new("acct_only").unwrap();
-    for context in contexts.iter().skip(1) {
-        assert_eq!(context.required_account(), Some(&account));
-        assert_eq!(context.transport(), AttemptTransport::Fallback);
-        assert!(!context.excluded_accounts().contains(&account));
+    // 每次建连失败先尝试换号，选不到其他账号后回到同账号 HTTP 恢复
+    for index in [1, 3, 5] {
+        assert!(contexts[index].required_account().is_none());
+        assert!(contexts[index].excluded_accounts().contains(&account));
+    }
+    for index in [2, 4, 6] {
+        assert_eq!(contexts[index].required_account(), Some(&account));
+        assert_eq!(contexts[index].transport(), AttemptTransport::Fallback);
+        assert!(!contexts[index].excluded_accounts().contains(&account));
     }
     let state = store.state.lock().unwrap();
     assert_eq!(state.intermediate_failures, 3);
@@ -5876,6 +5891,85 @@ fn connection_recovery_keeps_one_account_and_http_transport_until_success() {
     assert_eq!(provider.released_leases.load(Ordering::SeqCst), 3);
     drop(session);
     assert_eq!(provider.released_leases.load(Ordering::SeqCst), 4);
+}
+
+#[test]
+fn connection_failure_rotates_to_another_account() {
+    let operation = generate_operation();
+    let route_plan = plan(&operation);
+    let (coordinator, store, provider) = coordinator(vec![
+        Script::Stream {
+            account_id: "acct_first",
+            items: vec![Err(ProviderError::new(
+                ProviderErrorKind::Transport,
+                UpstreamSendState::NotSent,
+            )
+            .with_connection_retry(AttemptTransport::Fallback))],
+        },
+        Script::Stream {
+            account_id: "acct_second",
+            items: complete_stream(None),
+        },
+    ]);
+    let mut session = block_on(coordinator.start(
+        model_request(&operation, SystemTime::now() + Duration::from_secs(30)),
+        operation,
+        route_plan,
+        None,
+        None,
+        CancellationToken::new(),
+    ))
+    .unwrap();
+    block_on(session.collect_uncommitted()).unwrap();
+    block_on(session.commit_downstream(Some(200))).unwrap();
+    let contexts = provider.contexts.lock().unwrap();
+    assert_eq!(contexts.len(), 2);
+    let first = ProviderAccountId::new("acct_first").unwrap();
+    // 建连失败后排除原账号重新选号，不再钉住原出口
+    assert!(contexts[1].required_account().is_none());
+    assert!(contexts[1].excluded_accounts().contains(&first));
+    let state = store.state.lock().unwrap();
+    assert_eq!(state.intermediate_failures, 1);
+    assert_eq!(state.finalizations[0].outcome, ExecutionOutcome::Succeeded);
+}
+
+#[test]
+fn required_account_keeps_same_account_connection_recovery() {
+    let operation = generate_operation();
+    let route_plan = plan(&operation);
+    let failure = || Script::Stream {
+        account_id: "acct_required",
+        items: vec![Err(ProviderError::new(
+            ProviderErrorKind::Transport,
+            UpstreamSendState::NotSent,
+        )
+        .with_connection_retry(AttemptTransport::Fallback))],
+    };
+    let (coordinator, _, provider) = coordinator(vec![
+        failure(),
+        failure(),
+        Script::Stream {
+            account_id: "acct_required",
+            items: complete_stream(None),
+        },
+    ]);
+    let account = ProviderAccountId::new("acct_required").unwrap();
+    let mut session = block_on(coordinator.start(
+        model_request(&operation, SystemTime::now() + Duration::from_secs(30)),
+        operation,
+        route_plan,
+        Some(account.clone()),
+        None,
+        CancellationToken::new(),
+    ))
+    .unwrap();
+    block_on(session.collect_uncommitted()).unwrap();
+    let contexts = provider.contexts.lock().unwrap();
+    assert_eq!(contexts.len(), 3);
+    for context in contexts.iter() {
+        assert_eq!(context.required_account(), Some(&account));
+        assert!(!context.excluded_accounts().contains(&account));
+    }
 }
 
 #[test]
@@ -5958,11 +6052,12 @@ fn connection_backoff_cancellation_releases_account_without_another_attempt() {
         .with_connection_retry(AttemptTransport::Fallback))],
     }]);
     let cancellation = CancellationToken::new();
+    // 指定账号保持同账号建连恢复，取消发生在退避等待中
     let mut session = block_on(coordinator.start(
         model_request(&operation, SystemTime::now() + Duration::from_secs(30)),
         operation,
         route_plan,
-        None,
+        Some(ProviderAccountId::new("acct_first").expect("account id")),
         None,
         cancellation.clone(),
     ))

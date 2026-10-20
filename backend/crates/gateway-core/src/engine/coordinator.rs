@@ -318,6 +318,7 @@ where
             concurrency_wait_budget: ConcurrencyWaitBudget::default(),
             connection_budget: super::connection::ConnectionBudget::default(),
             connection_retries: 0,
+            connection_rotation: None,
             observation: ResponseObservation::new(timing_started_at),
             request_observation,
             budget_prior_attempts_usd: Decimal::ZERO,
@@ -471,6 +472,9 @@ pub struct ResponseExecutionSession<S: ?Sized> {
     concurrency_wait_budget: ConcurrencyWaitBudget,
     connection_budget: super::connection::ConnectionBudget,
     connection_retries: u32,
+    /// 同账号建连恢复失败后改为换号时保留的原恢复计划；没有其他可选账号时
+    /// 撤回排除并按原计划继续同账号恢复，选中其他账号后清除
+    connection_rotation: Option<PendingAttemptRetry>,
     observation: ResponseObservation,
     request_observation: Option<RequestObservationDispatch>,
     budget_prior_attempts_usd: Decimal,
@@ -1186,6 +1190,27 @@ where
                 Ok(stream) => stream,
                 Err(error) => {
                     attempt_trace.record_provider_failure(&error);
+                    if let Some(recovery) = self.connection_rotation.take()
+                        && matches!(
+                            error.kind(),
+                            ProviderErrorKind::AccountCapacityUnavailable
+                                | ProviderErrorKind::NoEligibleAccount
+                        )
+                        && error.send_state() == UpstreamSendState::NotSent
+                    {
+                        // 换号未找到其他账号时回到同账号建连恢复，单账号部署不因换号提前失败
+                        attempt_trace.record(
+                            "retry.decided",
+                            json!({
+                                "phase": "prepare",
+                                "retryable": true,
+                                "connectionRotationFallback": true,
+                            }),
+                        );
+                        self.excluded_accounts.remove(&recovery.account);
+                        self.pending_retry = Some(recovery);
+                        return Ok(Some(PullOutcome::AttemptDiscarded));
+                    }
                     let continuation_retry = !error.retry_is_prohibited()
                         && self.prepare_unavailable_native_continuation_replay(&error);
                     let candidate_retry = !error.retry_is_prohibited() && !continuation_retry
@@ -1398,6 +1423,7 @@ where
         {
             self.account_rotations = self.account_rotations.saturating_add(1);
         }
+        self.connection_rotation = None;
         if self.account_state_owner.is_none() {
             self.account_state_owner = Some(ProviderAccountStateOwner::new(
                 metadata.provider().clone(),
@@ -1642,6 +1668,24 @@ where
             }
             _ => None,
         };
+        // 建连失败先排除该账号换号；出口或代理持续不可达时，单次建连就会等满超时，
+        // 继续同账号恢复会在同一路由上耗尽共享建连窗口
+        // 没有其他可选账号时，prepare_attempt 撤回排除并按原计划继续同账号恢复
+        let connection_rotation = transport_recovery
+            .filter(|_| {
+                connection_retry_requested
+                    && self.account_selection.required_account().is_none()
+                    && self.routing_attempts < self.plan.max_attempts().get()
+                    && self.account_rotations
+                        < self.plan.account_selection_policy().max_account_rotations()
+            })
+            .map(|(transport, delay)| PendingAttemptRetry {
+                account: current.metadata.provider_account_id().clone(),
+                transport,
+                delay,
+                transport_recovery: true,
+            });
+        let transport_recovery = transport_recovery.filter(|_| connection_rotation.is_none());
         let ordinary_retry = !self.connection_budget.exhausted()
             && !connection_retry_requested
             && !execution_effect_observed
@@ -1706,7 +1750,7 @@ where
             && transient_retry.is_none()
             && !is_return_error_retry(&error)
             && transport_recovery.is_none()
-            && (ordinary_retry || account_rotation_retry)
+            && (ordinary_retry || account_rotation_retry || connection_rotation.is_some())
             && self.account_rotations
                 < self.plan.account_selection_policy().max_account_rotations();
         let retryable = !error.retry_is_prohibited()
@@ -1754,6 +1798,7 @@ where
             "clientRetrySuppressed": suppress_transient_retry,
             "rotationRetry": rotation_retry, "accountRotations": self.account_rotations,
             "connectionRetry": connection_retry_requested,
+            "connectionRotation": connection_rotation.is_some(),
             "connectionRetries": self.connection_retries,
             "connectionBudgetRemainingMs": self.connection_budget.remaining().map(duration_ms),
             "executionEffectObserved": execution_effect_observed,
@@ -1806,6 +1851,7 @@ where
             } else if !continuation_retry {
                 self.excluded_accounts
                     .insert(current.metadata.provider_account_id().clone());
+                self.connection_rotation = connection_rotation;
             }
             self.last_retryable_failure_events = atomic_client_events;
             self.last_retryable_failure = Some(error);
