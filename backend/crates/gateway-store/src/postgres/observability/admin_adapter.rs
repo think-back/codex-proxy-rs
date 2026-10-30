@@ -317,6 +317,30 @@ impl PgObservabilityRepository {
             .await
     }
 
+    pub async fn usage_metric_observation(
+        &self,
+        range: ObservabilityRange,
+        filter: UsageRecordFilter,
+        granularity: admin_observability::Granularity,
+        metric: admin_observability::UsageInsightMetric,
+    ) -> StoreResult<admin_observability::UsageInsightsObservation> {
+        self.query_budget
+            .run(
+                &self.pool,
+                "load usage metric snapshot",
+                |mut connection| async move {
+                    let mut snapshot = analytics::AnalyticsSnapshot::new(&mut connection).await?;
+                    let mut observation = snapshot
+                        .metric(range, &filter, granularity, self.timezone, metric)
+                        .await?;
+                    observation.overview.analytics = snapshot.metadata();
+                    snapshot.finish().await?;
+                    Ok(observation)
+                },
+            )
+            .await
+    }
+
     pub async fn provider_account_usage(
         &self,
         query: ProviderAccountUsageQuery,
@@ -513,6 +537,24 @@ impl AdminObservabilityStore for PgAdminObservabilityStore {
                 store_usage_filter(filter),
                 granularity,
                 include_concurrency,
+            )
+            .await
+            .map_err(observability_error)
+    }
+
+    async fn usage_metric_observation(
+        &self,
+        range: admin_observability::TimeRange,
+        filter: admin_observability::UsageFilter,
+        granularity: admin_observability::Granularity,
+        metric: admin_observability::UsageInsightMetric,
+    ) -> AdminStoreResult<admin_observability::UsageInsightsObservation> {
+        self.repository
+            .usage_metric_observation(
+                store_range(range).map_err(observability_error)?,
+                store_usage_filter(filter),
+                granularity,
+                metric,
             )
             .await
             .map_err(observability_error)

@@ -179,6 +179,7 @@ pub(crate) struct CachedObservabilityStore {
     dashboard: Cache<DashboardQuery, DashboardObservation>,
     summaries: Cache<UsageKey, UsageSummaryObservation>,
     insights: Cache<(UsageKey, Granularity, bool), UsageInsightsObservation>,
+    metrics: Cache<(UsageKey, Granularity, UsageInsightMetric), UsageInsightsObservation>,
     diagnostics: Cache<(UsageKey, DiagnosticDimension, u16), DiagnosticsObservation>,
 }
 impl CachedObservabilityStore {
@@ -188,6 +189,7 @@ impl CachedObservabilityStore {
             dashboard: Cache::default(),
             summaries: Cache::default(),
             insights: Cache::default(),
+            metrics: Cache::default(),
             diagnostics: Cache::default(),
         }
     }
@@ -255,6 +257,26 @@ impl ObservabilityStore for CachedObservabilityStore {
             )
             .await
     }
+    async fn usage_metric_observation(
+        &self,
+        range: TimeRange,
+        filter: UsageFilter,
+        granularity: Granularity,
+        metric: UsageInsightMetric,
+    ) -> AdminStoreResult<UsageInsightsObservation> {
+        self.metrics
+            .get(
+                ((range, filter.clone()), granularity, metric),
+                self.inner.as_ref(),
+                TTL,
+                || {
+                    self.inner
+                        .usage_metric_observation(range, filter, granularity, metric)
+                },
+            )
+            .await
+    }
+
     async fn usage_summary(
         &self,
         range: TimeRange,

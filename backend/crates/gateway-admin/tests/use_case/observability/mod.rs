@@ -1098,6 +1098,7 @@ struct FixtureObservabilityStore {
     concurrency: Mutex<Vec<UsageConcurrencyPoint>>,
     insights_fail: AtomicBool,
     concurrency_selections: Mutex<Vec<bool>>,
+    metric_selections: Mutex<Vec<gateway_admin::model::observability::UsageInsightMetric>>,
     summary_fail: AtomicBool,
     diagnostics: Mutex<DiagnosticsObservation>,
     runtime_slots: Mutex<Option<DashboardRuntimeSlots>>,
@@ -1127,6 +1128,7 @@ impl FixtureObservabilityStore {
             concurrency: Mutex::new(Vec::new()),
             insights_fail: AtomicBool::new(false),
             concurrency_selections: Mutex::new(Vec::new()),
+            metric_selections: Mutex::new(Vec::new()),
             summary_fail: AtomicBool::new(false),
             diagnostics: Mutex::new(DiagnosticsObservation::default()),
             runtime_slots: Mutex::new(None),
@@ -1267,6 +1269,23 @@ impl ObservabilityStore for FixtureObservabilityStore {
                 Vec::new()
             },
         })
+    }
+
+    async fn usage_metric_observation(
+        &self,
+        range: gateway_admin::model::observability::TimeRange,
+        filter: gateway_admin::model::observability::UsageFilter,
+        granularity: gateway_admin::model::observability::Granularity,
+        metric: gateway_admin::model::observability::UsageInsightMetric,
+    ) -> AdminStoreResult<gateway_admin::model::observability::UsageInsightsObservation> {
+        self.metric_selections.lock().unwrap().push(metric);
+        self.usage_insights_observation(
+            range,
+            filter,
+            granularity,
+            metric == gateway_admin::model::observability::UsageInsightMetric::Load,
+        )
+        .await
     }
 
     async fn list_usage_records(&self, query: UsageQuery) -> AdminStoreResult<UsagePage> {
@@ -1795,4 +1814,49 @@ async fn insights_cache_should_reject_deleted_building_and_old_generation_times(
             "{reason}"
         );
     }
+}
+
+#[tokio::test]
+async fn usage_metric_cache_isolates_selections_and_filters() {
+    use gateway_admin::model::observability::UsageInsightMetric as Metric;
+    let range = observation_range(Utc::now());
+    let store = Arc::new(FixtureObservabilityStore::new(range));
+    let services = observability_services(store.clone()).await;
+    let metrics = [
+        Metric::Health,
+        Metric::Latency,
+        Metric::FirstToken,
+        Metric::Throughput,
+        Metric::Load,
+        Metric::Cost,
+        Metric::Savings,
+        Metric::Cache,
+    ];
+    for _ in 0..2 {
+        for metric in metrics {
+            services
+                .observability()
+                .usage_metric(range, UsageFilter::default(), metric)
+                .await
+                .unwrap();
+        }
+    }
+    assert_eq!(*store.metric_selections.lock().unwrap(), metrics);
+    assert_eq!(
+        *store.concurrency_selections.lock().unwrap(),
+        vec![false, false, false, false, true, false, false, false]
+    );
+    services
+        .observability()
+        .usage_metric(
+            range,
+            UsageFilter {
+                provider_kind: Some("openai".into()),
+                ..Default::default()
+            },
+            Metric::Latency,
+        )
+        .await
+        .unwrap();
+    assert_eq!(store.metric_selections.lock().unwrap().len(), 9);
 }

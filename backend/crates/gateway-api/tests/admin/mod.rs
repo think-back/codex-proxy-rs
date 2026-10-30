@@ -1519,6 +1519,22 @@ impl ObservabilityStore for UnusedStore {
         )
     }
 
+    async fn usage_metric_observation(
+        &self,
+        range: gateway_admin::model::observability::TimeRange,
+        filter: gateway_admin::model::observability::UsageFilter,
+        granularity: gateway_admin::model::observability::Granularity,
+        metric: gateway_admin::model::observability::UsageInsightMetric,
+    ) -> AdminStoreResult<gateway_admin::model::observability::UsageInsightsObservation> {
+        self.usage_insights_observation(
+            range,
+            filter,
+            granularity,
+            metric == gateway_admin::model::observability::UsageInsightMetric::Load,
+        )
+        .await
+    }
+
     async fn list_usage_records(&self, query: UsageQuery) -> AdminStoreResult<UsagePage> {
         self.observations
             .lock()

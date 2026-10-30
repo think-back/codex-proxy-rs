@@ -30,7 +30,8 @@ use crate::model::{
         DashboardObservation, DashboardQuery, DiagnosticDimension, DiagnosticsObservation,
         Granularity, OpsErrorPage, OpsErrorQuery, RequestMetricPoint, TimeRange,
         UsageBillingProjection, UsageCalculatedBillingFact, UsageDetail, UsageFilter,
-        UsageInsightsObservation, UsagePage, UsageQuery, UsageSummaryObservation,
+        UsageInsightMetric, UsageInsightsObservation, UsagePage, UsageQuery,
+        UsageSummaryObservation,
     },
     provider_credentials::{
         AuthorizationCommit, CredentialDetails, CredentialImportCommit, CredentialImportResult,
@@ -463,6 +464,15 @@ pub trait ObservabilityStore: Send + Sync {
         filter: UsageFilter,
         granularity: Granularity,
         include_concurrency: bool,
+    ) -> AdminStoreResult<UsageInsightsObservation>;
+
+    /// 只读取所选指标及其可见汇总依赖，未选择的字段不供业务层消费
+    async fn usage_metric_observation(
+        &self,
+        range: TimeRange,
+        filter: UsageFilter,
+        granularity: Granularity,
+        metric: UsageInsightMetric,
     ) -> AdminStoreResult<UsageInsightsObservation>;
 
     async fn list_usage_records(&self, query: UsageQuery) -> AdminStoreResult<UsagePage>;

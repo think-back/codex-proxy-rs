@@ -2156,7 +2156,10 @@ errorCode, errorMessage, startedAt, completedAt, expiresAt, createdAt, updatedAt
 | `GET` | `/api/admin/usage/records` | 请求记录分页列表 |
 | `GET` | `/api/admin/usage/records/detail` | 按 `id` 查询请求详情 |
 | `GET` | `/api/admin/usage/records/summary` | 当前筛选条件的请求汇总 |
-| `GET` | `/api/admin/usage/insights/overview` | 用量、成本与成功率洞察 |
+| `GET` | `/api/admin/usage/insights/overview` | 完整用量洞察 |
+| `GET` | `/api/admin/usage/insights/health` | 请求健康 |
+| `GET` | `/api/admin/usage/insights/performance` | 响应性能；`metric=latency\|firstToken\|throughput\|load` |
+| `GET` | `/api/admin/usage/insights/cost` | 成本效率；`metric=cost\|savings\|cache` |
 | `GET` | `/api/admin/usage/insights/diagnostics` | 按维度聚合诊断 |
 | `GET` | `/api/admin/operations/errors` | 运维错误分页列表 |
 | `GET` | `/api/admin/diagnostics/export` | 按 `requestId` 或 `errorId` 下载诊断 ZIP 附件 |
@@ -2178,7 +2181,7 @@ errorCode, errorMessage, startedAt, completedAt, expiresAt, createdAt, updatedAt
 
 `points[]` 提供趋势图与首页卡片使用的请求数、Tokens、缓存比例、错误数、成功率、
 `latencyValue`、首 Token P95、总延迟 P95 和输出吞吐 P50，以及时间标签与展示值
-请求并发与内部调度等待通过用量洞察的 `performance.load` 查询
+请求并发与内部调度等待通过 `/api/admin/usage/insights/performance?metric=load` 查询
 
 ### Dashboard 客户端身份
 
@@ -2215,7 +2218,7 @@ Dashboard 默认 `period=today`，用量、诊断和错误查询默认 `period=7
 Dashboard 返回原始 `asOf` 及 `asOfDisplay`，作为当前数据的查询锚点
 
 请求明细列表接受 `currentPage`、`pageSize`、时间范围、`provider`、`clientApiKeyName`、`accountName`、`model` 和 `status`。
-汇总和洞察只接受时间范围与 `provider`；诊断另接受 `dimension`、`model` 和 `statusCode`。
+汇总和洞察接受时间范围与 `provider`；性能和成本另要求 `metric`，诊断另接受 `dimension`、`model` 和 `statusCode`。
 各接口拒绝未知参数，明细筛选不改变顶部统计范围
 
 请求列表的 `status` 可取 `success`、`error`、`all`，默认 `success`；未知值返回 `400`。
@@ -2259,6 +2262,20 @@ Dashboard 返回原始 `asOf` 及 `asOfDisplay`，作为当前数据的查询锚
 
 运维错误列表的 `search` 使用字面量包含匹配，`%`、`_` 和 `\` 按普通字符处理，不支持密钥值或可见前缀搜索。
 请求详情通过 `/api/admin/usage/records/detail?id=...` 查询
+
+### 卡片洞察查询
+
+请求健康、响应性能、成本效率与热点诊断分别查询自己的路由；性能和成本按选中的 `metric` 查询，诊断按 `dimension` 查询。
+各卡片独立加载和显示错误，切换选项取消该卡片的旧请求；时间范围与平台筛选共同作用于所有卡片。
+`overview` 返回完整洞察，管理端卡片使用分项接口
+
+健康、性能与成本接口返回 `analytics`、`granularity`、`metric` 和 `data`。
+健康的 `metric` 固定为 `health`，`data` 含健康摘要和趋势；性能与成本的 `data` 含 `summary` 和 `points`，
+每个点包含 `bucket`、`label`、`requestCount` 和所选指标的 `value`。缺失样本保留 `null`，不填充未查询指标
+
+性能摘要与趋势分别返回总耗时分位数、首 Token 分位数、吞吐分位数或负载指标；只有 `metric=load` 读取请求并发。
+成本的三个选项共用费用、节省、溢价、每次成功请求费用和覆盖率摘要，趋势分别返回实际与无缓存估算费用、缓存节省或缓存比例。
+缺少 `metric`、选择其他卡片的指标或传入未知指标均返回 `400`
 
 ### 记录范围与统计口径
 
