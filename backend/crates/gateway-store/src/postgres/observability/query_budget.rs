@@ -25,11 +25,16 @@ pub struct ObservabilityConnection {
     connection: PoolConnection<Postgres>,
     permit: Option<OwnedSemaphorePermit>,
     query_timeout: Duration,
+    query_deadline: tokio::time::Instant,
 }
 
 impl ObservabilityConnection {
     pub(crate) const fn query_timeout(&self) -> Duration {
         self.query_timeout
+    }
+
+    pub(crate) const fn query_deadline(&self) -> tokio::time::Instant {
+        self.query_deadline
     }
 }
 
@@ -111,7 +116,8 @@ impl ObservabilityQueryBudget {
         F: FnOnce(ObservabilityConnection) -> Q,
         Q: Future<Output = StoreResult<T>>,
     {
-        tokio::time::timeout(self.query_timeout, async {
+        let query_deadline = tokio::time::Instant::now() + self.query_timeout;
+        tokio::time::timeout_at(query_deadline, async {
             let permit = self.acquire(operation).await?;
             let connection = pool.acquire().await.map_err(|source| {
                 postgres_unavailable("acquire observability connection", source)
@@ -120,6 +126,7 @@ impl ObservabilityQueryBudget {
                 connection,
                 permit: Some(permit),
                 query_timeout: self.query_timeout,
+                query_deadline,
             })
             .await
         })

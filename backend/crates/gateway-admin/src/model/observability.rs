@@ -1272,8 +1272,8 @@ pub struct UsageConcurrencyPoint {
 /// 请求并发与调度等待的负载指标
 #[derive(Debug, Clone, PartialEq)]
 pub struct UsageInsightsLoad {
-    pub average_concurrency: f64,
-    pub peak_concurrency: u64,
+    pub average_concurrency: Option<f64>,
+    pub peak_concurrency: Option<u64>,
     pub admission_decision_p95_ms: Option<PercentileMilliseconds>,
     pub account_selection_wait_p95_ms: Option<PercentileMilliseconds>,
 }

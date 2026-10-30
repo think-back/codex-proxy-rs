@@ -691,7 +691,8 @@ pub(super) struct MemoryClientKeyStore(Arc<Mutex<Option<ClientKeyRecord>>>);
 pub(super) struct MemoryObservations {
     pub summary: Option<UsageOverview>,
     pub trend: Option<Vec<RequestMetricPoint>>,
-    pub concurrency: Vec<gateway_admin::model::observability::UsageConcurrencyPoint>,
+    pub concurrency: Option<Vec<gateway_admin::model::observability::UsageConcurrencyPoint>>,
+    pub concurrency_requests: Vec<bool>,
     pub summaries: Vec<(TimeRange, UsageFilter)>,
     pub trends: Vec<(TimeRange, UsageFilter)>,
     pub records: Vec<UsageQuery>,
@@ -1491,10 +1492,12 @@ impl ObservabilityStore for UnusedStore {
         range: TimeRange,
         filter: UsageFilter,
         _: Granularity,
+        include_concurrency: bool,
     ) -> AdminStoreResult<gateway_admin::model::observability::UsageInsightsObservation> {
         let mut data = self.observations.lock().expect("observations");
         data.summaries.push((range, filter.clone()));
         data.trends.push((range, filter));
+        data.concurrency_requests.push(include_concurrency);
         Ok(
             gateway_admin::model::observability::UsageInsightsObservation {
                 overview: data
@@ -1507,7 +1510,11 @@ impl ObservabilityStore for UnusedStore {
                     .clone()
                     .ok_or_else(|| unavailable("usage trend"))?,
                 costs: Vec::new(),
-                concurrency: data.concurrency.clone(),
+                concurrency: if include_concurrency {
+                    data.concurrency.clone()
+                } else {
+                    None
+                },
             },
         )
     }

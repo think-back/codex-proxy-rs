@@ -455,12 +455,13 @@ pub trait ObservabilityStore: Send + Sync {
         granularity: Granularity,
     ) -> AdminStoreResult<Vec<RequestMetricPoint>>;
 
-    /// 同一读取快照中的汇总、趋势和已投影情景费用
+    /// 同一读取快照中的汇总、趋势和已投影情景费用，仅消费并发结果的入口请求并发计算
     async fn usage_insights_observation(
         &self,
         range: TimeRange,
         filter: UsageFilter,
         granularity: Granularity,
+        include_concurrency: bool,
     ) -> AdminStoreResult<UsageInsightsObservation>;
 
     async fn list_usage_records(&self, query: UsageQuery) -> AdminStoreResult<UsagePage>;

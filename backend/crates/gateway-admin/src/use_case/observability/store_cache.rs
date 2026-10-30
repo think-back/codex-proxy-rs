@@ -178,7 +178,7 @@ pub(crate) struct CachedObservabilityStore {
     inner: Arc<dyn ObservabilityStore>,
     dashboard: Cache<DashboardQuery, DashboardObservation>,
     summaries: Cache<UsageKey, UsageSummaryObservation>,
-    insights: Cache<(UsageKey, Granularity), UsageInsightsObservation>,
+    insights: Cache<(UsageKey, Granularity, bool), UsageInsightsObservation>,
     diagnostics: Cache<(UsageKey, DiagnosticDimension, u16), DiagnosticsObservation>,
 }
 impl CachedObservabilityStore {
@@ -237,15 +237,20 @@ impl ObservabilityStore for CachedObservabilityStore {
         range: TimeRange,
         filter: UsageFilter,
         granularity: Granularity,
+        include_concurrency: bool,
     ) -> AdminStoreResult<UsageInsightsObservation> {
         self.insights
             .get(
-                ((range, filter.clone()), granularity),
+                ((range, filter.clone()), granularity, include_concurrency),
                 self.inner.as_ref(),
                 TTL,
                 || {
-                    self.inner
-                        .usage_insights_observation(range, filter, granularity)
+                    self.inner.usage_insights_observation(
+                        range,
+                        filter,
+                        granularity,
+                        include_concurrency,
+                    )
                 },
             )
             .await

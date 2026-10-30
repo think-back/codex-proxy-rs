@@ -2,11 +2,17 @@
 
 use super::*;
 use futures::TryStreamExt;
+use sqlx::Acquire as _;
+use std::time::Duration;
+
+const CONCURRENCY_REQUEST_LIMIT: i64 = 10_000;
+const CONCURRENCY_QUERY_TIMEOUT: Duration = Duration::from_secs(2);
 
 pub(crate) struct AnalyticsSnapshot<'a> {
     pub tx: sqlx::Transaction<'a, Postgres>,
     pub(super) status: AnalyticsStatus,
     approximate: bool,
+    query_deadline: tokio::time::Instant,
 }
 
 #[derive(Clone, Copy)]
@@ -41,6 +47,7 @@ impl<'a> AnalyticsSnapshot<'a> {
         connection: &'a mut ObservabilityConnection,
         require_current_schema: bool,
     ) -> StoreResult<Self> {
+        let query_deadline = connection.query_deadline();
         let mut tx = begin_snapshot(connection).await?;
         // 时间跨度和分组选择性差异很大，通用计划会把长区间误估成短区间
         // 仅当前只读事务使用实际参数规划，不改变连接池后续事务的计划策略
@@ -61,6 +68,7 @@ impl<'a> AnalyticsSnapshot<'a> {
             tx,
             status,
             approximate: false,
+            query_deadline,
         })
     }
 
@@ -335,11 +343,12 @@ impl<'a> AnalyticsSnapshot<'a> {
         filter: &UsageRecordFilter,
         granularity: ObservationGranularity,
         timezone: gateway_core::time::DeploymentTimeZone,
+        include_concurrency: bool,
     ) -> StoreResult<(
         UsageOverview,
         Vec<RequestMetricPoint>,
         Vec<admin_observability::UsageProjectedCostPoint>,
-        Vec<admin_observability::UsageConcurrencyPoint>,
+        Option<Vec<admin_observability::UsageConcurrencyPoint>>,
     )> {
         let states = self
             .load(range, filter, None, Some(granularity), timezone, true)
@@ -355,9 +364,6 @@ impl<'a> AnalyticsSnapshot<'a> {
                 })
             })
             .collect::<StoreResult<Vec<_>>>()?;
-        let concurrency = self
-            .concurrency(range, filter, granularity, timezone)
-            .await?;
         // 趋势已包含可合并的完整指标和情景费用，概览直接复用同一份状态
         // 精确分位数不可跨桶合并，明细回退时仍按完整区间单独计算概览
         let overview = if states.values().any(MetricState::has_exact_percentiles) {
@@ -365,6 +371,12 @@ impl<'a> AnalyticsSnapshot<'a> {
         } else {
             self.overview_from_state(range, filter, merge_states(states.into_values())?)
                 .await?
+        };
+        let concurrency = if include_concurrency {
+            self.concurrency(range, filter, granularity, timezone)
+                .await?
+        } else {
+            None
         };
         Ok((overview, trend, costs, concurrency))
     }
@@ -375,7 +387,7 @@ impl<'a> AnalyticsSnapshot<'a> {
         filter: &UsageRecordFilter,
         granularity: ObservationGranularity,
         timezone: gateway_core::time::DeploymentTimeZone,
-    ) -> StoreResult<Vec<admin_observability::UsageConcurrencyPoint>> {
+    ) -> StoreResult<Option<Vec<admin_observability::UsageConcurrencyPoint>>> {
         filter.validate()?;
         self.require_visible(Some(range))?;
         let boundaries = if granularity == ObservationGranularity::Day {
@@ -407,7 +419,7 @@ impl<'a> AnalyticsSnapshot<'a> {
             .push_bind(range.end)
             .push("::timestamptz) as bucket_end,bucket_start from unnest(")
             .push_bind(boundaries)
-            .push("::timestamptz[]) input(bucket_start)), matching as (select mr.started_at,mr.completed_at from model_request_observations mr where mr.outcome <> 'running' and mr.completed_at > ")
+            .push("::timestamptz[]) input(bucket_start)), matching as materialized (select mr.started_at,mr.completed_at from model_request_observations mr where mr.outcome <> 'running' and mr.completed_at > ")
             .push_bind(range.start)
             .push(" and mr.started_at < ")
             .push_bind(range.end);
@@ -418,10 +430,16 @@ impl<'a> AnalyticsSnapshot<'a> {
             .push("::timestamptz as completed_at from model_request_observations mr where mr.outcome = 'running' and mr.started_at < ")
             .push_bind(range.end);
         push_analytics_filter(&mut query, filter, "mr");
+        // 候选上限在事件展开与排序前生效；超限时不能把截断后的峰值冒充完整结果
+        query
+            .push(" limit ")
+            .push_bind(CONCURRENCY_REQUEST_LIMIT + 1)
+            .push("), admitted as materialized (select * from matching where (select count(*) from matching) <= ")
+            .push_bind(CONCURRENCY_REQUEST_LIMIT);
         // 每个请求只产生两个事件，桶边界只切分时间轴，避免请求与所有桶逐一连接
         // 同时刻先合并增减，再计算下一段并发，遵循左闭右开的执行区间
         query
-            .push("), events as (select e.occurred_at,e.delta,null::timestamptz as bucket_start from matching m cross join lateral (values (greatest(m.started_at,")
+            .push("), events as (select e.occurred_at,e.delta,null::timestamptz as bucket_start from admitted m cross join lateral (values (greatest(m.started_at,")
             .push_bind(range.start)
             .push("::timestamptz),1::bigint),(least(m.completed_at,")
             .push_bind(range.end)
@@ -438,17 +456,81 @@ impl<'a> AnalyticsSnapshot<'a> {
                     from event_points
                     window timeline_order as (order by occurred_at rows between unbounded preceding and current row)
                 )
-                select b.bucket_start,
+                select b.bucket_start,(select count(*) from matching) as candidate_count,
                     coalesce(sum(t.concurrency*extract(epoch from t.next_occurred_at-t.occurred_at))
                         /nullif(extract(epoch from b.bucket_end-b.effective_start),0),0)::float8 as average_concurrency,
                     coalesce(max(t.concurrency),0)::bigint as peak_concurrency
                 from buckets b left join timeline t on t.bucket_start=b.bucket_start and t.next_occurred_at>t.occurred_at
                 group by b.bucket_start,b.effective_start,b.bucket_end order by b.bucket_start");
-        let rows = query
-            .build()
-            .fetch_all(&mut *self.tx)
-            .await
-            .map_err(|error| postgres_unavailable("aggregate request concurrency", error))?;
+        if self
+            .query_deadline
+            .saturating_duration_since(tokio::time::Instant::now())
+            < Duration::from_millis(2)
+        {
+            return Ok(None);
+        }
+        let mut bounded =
+            self.tx.begin().await.map_err(|error| {
+                postgres_unavailable("begin request concurrency savepoint", error)
+            })?;
+        let result = async {
+            // 同一部署 schema 的多个进程共享一个名额；不排队放大页面轮询负载
+            let admitted: bool = sqlx::query_scalar(
+                "select pg_try_advisory_xact_lock(hashtextextended(current_schema()::text,382033))",
+            )
+            .fetch_one(&mut *bounded)
+            .await?;
+            if !admitted {
+                return Ok(None);
+            }
+            // 排队与基础统计已消耗总预算，剩余时间至少保留一半用于取消收尾与快照提交
+            let remaining = self
+                .query_deadline
+                .saturating_duration_since(tokio::time::Instant::now());
+            let timeout = CONCURRENCY_QUERY_TIMEOUT.min(remaining / 2);
+            if timeout < Duration::from_millis(1) {
+                return Ok(None);
+            }
+            sqlx::query("select set_config('statement_timeout',$1,true)")
+                .bind(format!("{}ms", timeout.as_millis()))
+                .execute(&mut *bounded)
+                .await?;
+            query.build().fetch_all(&mut *bounded).await.map(Some)
+        }
+        .await;
+        // 只读子操作也回滚保存点，同时恢复时限并释放事务锁，主快照仍可继续读取
+        let cleanup = bounded.rollback().await;
+        let rows = match result {
+            Ok(rows) => {
+                cleanup.map_err(|error| {
+                    postgres_unavailable("rollback request concurrency savepoint", error)
+                })?;
+                rows
+            }
+            Err(error) => {
+                let timed_out = error
+                    .as_database_error()
+                    .and_then(|error| error.code())
+                    .as_deref()
+                    == Some("57014");
+                let error = postgres_unavailable("aggregate request concurrency", error);
+                if let Err(cleanup) = cleanup {
+                    return Err(error.with_cleanup(cleanup));
+                }
+                if timed_out {
+                    return Ok(None);
+                }
+                return Err(error);
+            }
+        };
+        let Some(rows) = rows else {
+            return Ok(None);
+        };
+        if let Some(row) = rows.first()
+            && get::<i64>(row, "candidate_count")? > CONCURRENCY_REQUEST_LIMIT
+        {
+            return Ok(None);
+        }
         rows.iter()
             .map(|row| {
                 Ok(admin_observability::UsageConcurrencyPoint {
@@ -457,7 +539,8 @@ impl<'a> AnalyticsSnapshot<'a> {
                     peak_concurrency: unsigned(row, "peak_concurrency")?,
                 })
             })
-            .collect()
+            .collect::<StoreResult<Vec<_>>>()
+            .map(Some)
     }
 
     pub async fn diagnostics(

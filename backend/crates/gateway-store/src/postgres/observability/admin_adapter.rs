@@ -287,6 +287,7 @@ impl PgObservabilityRepository {
         range: ObservabilityRange,
         filter: UsageRecordFilter,
         granularity: admin_observability::Granularity,
+        include_concurrency: bool,
     ) -> StoreResult<admin_observability::UsageInsightsObservation> {
         self.query_budget
             .run(
@@ -295,7 +296,13 @@ impl PgObservabilityRepository {
                 |mut connection| async move {
                     let mut snapshot = analytics::AnalyticsSnapshot::new(&mut connection).await?;
                     let (mut overview, trend, costs, concurrency) = snapshot
-                        .insights(range, &filter, granularity, self.timezone)
+                        .insights(
+                            range,
+                            &filter,
+                            granularity,
+                            self.timezone,
+                            include_concurrency,
+                        )
                         .await?;
                     overview.analytics = snapshot.metadata();
                     snapshot.finish().await?;
@@ -498,12 +505,14 @@ impl AdminObservabilityStore for PgAdminObservabilityStore {
         range: admin_observability::TimeRange,
         filter: admin_observability::UsageFilter,
         granularity: admin_observability::Granularity,
+        include_concurrency: bool,
     ) -> AdminStoreResult<admin_observability::UsageInsightsObservation> {
         self.repository
             .usage_insights_observation(
                 store_range(range).map_err(observability_error)?,
                 store_usage_filter(filter),
                 granularity,
+                include_concurrency,
             )
             .await
             .map_err(observability_error)

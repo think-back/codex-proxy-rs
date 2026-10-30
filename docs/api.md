@@ -2282,14 +2282,18 @@ OpenAI 推理强度优先取 `input` 中最后一条 `type: "configuration_updat
 
 | 字段 | 含义 |
 | --- | --- |
-| `averageConcurrency` | 按有效时长加权的平均请求并发 |
-| `peakConcurrency` | 最大重叠请求数 |
+| `averageConcurrency` | 按有效时长加权的平均请求并发，无法在计算预算内取得时为 `null` |
+| `peakConcurrency` | 最大重叠请求数，无法在计算预算内取得时为 `null` |
 | `admissionDecisionP95Ms` | 准入判定耗时 P95，单位毫秒，无样本为 `null` |
 | `accountSelectionWaitP95Ms` | 账号选择等待耗时 P95，单位毫秒，无样本为 `null` |
 
 并发按逻辑请求的执行区间计算，不因重试 attempt 重复计数。
 区间从 `started_at` 到 `completed_at`，执行中请求按查询范围末端仍在处理计算；与时间桶重叠的请求参与该桶，
 平均值按重叠时长加权，峰值取桶内最大重叠请求数，无请求的时间桶为零。全范围平均按有效查询时长加权，峰值取各桶最大值
+
+并发计算最多处理 10,000 条匹配请求，SQL 时限最多 2 秒，并为总查询预算内的事务收尾预留时间，同一部署 schema 内只允许一个计算。
+候选超限、计算超时、剩余预算不足或已有计算占用时，汇总和所有时间桶的两个并发字段均为 `null`，其他用量、费用与等待指标正常返回。
+`null` 表示未取得精确并发，不代表零或经过截断的估计值；可缩小时间范围后查询。Key 用量和 Dashboard 趋势不计算并发
 
 汇总与洞察中的请求数与 outcome 分布覆盖筛选范围内全部请求；token、缓存、延迟与成本聚合仅统计
 已完整交付客户端的成功推理响应。OpenAI 的 `generate: false` 连接与上下文准备记录归类为

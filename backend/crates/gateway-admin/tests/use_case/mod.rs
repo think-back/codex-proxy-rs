@@ -805,6 +805,7 @@ impl ObservabilityStore for UnavailableStore {
         _: TimeRange,
         _: UsageFilter,
         _: Granularity,
+        _: bool,
     ) -> AdminStoreResult<gateway_admin::model::observability::UsageInsightsObservation> {
         Err(unavailable("usage insights"))
     }

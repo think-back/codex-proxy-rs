@@ -219,6 +219,7 @@ async fn overview_scopes_every_query_and_projects_only_key_visible_fields() {
     let observations = fixture.observations.lock().unwrap();
     assert_eq!(observations.summaries.len(), 1);
     assert_eq!(observations.trends.len(), 2);
+    assert_eq!(observations.concurrency_requests, [false]);
     for (_, filter) in observations
         .summaries
         .iter()

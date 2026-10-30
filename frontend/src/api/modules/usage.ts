@@ -257,8 +257,8 @@ export interface UsageOverviewHealth {
 }
 
 export interface UsageOverviewLoad {
-  averageConcurrency: number
-  peakConcurrency: number
+  averageConcurrency: number | null
+  peakConcurrency: number | null
   admissionDecisionP95Ms: number | null
   accountSelectionWaitP95Ms: number | null
 }
