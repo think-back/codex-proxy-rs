@@ -653,8 +653,8 @@ pub struct OverviewHealthView {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OverviewLoadView {
-    pub average_concurrency: Option<f64>,
-    pub peak_concurrency: Option<u64>,
+    pub average_concurrency: f64,
+    pub peak_concurrency: u64,
     pub admission_decision_p95_ms: Option<f64>,
     pub account_selection_wait_p95_ms: Option<f64>,
 }

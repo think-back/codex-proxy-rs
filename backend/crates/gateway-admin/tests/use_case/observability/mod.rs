@@ -777,7 +777,7 @@ async fn usage_insights_should_weight_concurrency_by_effective_bucket_duration()
             RequestMetrics::default(),
         ),
     ]);
-    *store.concurrency.lock().unwrap() = Some(vec![
+    *store.concurrency.lock().unwrap() = vec![
         UsageConcurrencyPoint {
             bucket_start,
             average_concurrency: 1.0,
@@ -788,7 +788,7 @@ async fn usage_insights_should_weight_concurrency_by_effective_bucket_duration()
             average_concurrency: 3.0,
             peak_concurrency: 4,
         },
-    ]);
+    ];
 
     let insights = observability_services(store)
         .await
@@ -797,92 +797,12 @@ async fn usage_insights_should_weight_concurrency_by_effective_bucket_duration()
         .await
         .unwrap();
 
-    assert!((insights.performance.load.average_concurrency.unwrap() - 5.0 / 3.0).abs() < 1e-10);
-    assert_eq!(insights.performance.load.peak_concurrency, Some(4));
-    assert_eq!(
-        insights.performance.points[0].load.average_concurrency,
-        Some(1.0)
-    );
-    assert_eq!(
-        insights.performance.points[0].load.peak_concurrency,
-        Some(1)
-    );
-    assert_eq!(
-        insights.performance.points[1].load.average_concurrency,
-        Some(3.0)
-    );
-    assert_eq!(
-        insights.performance.points[1].load.peak_concurrency,
-        Some(4)
-    );
-}
-
-#[tokio::test]
-async fn insights_cache_should_isolate_concurrency_selection_from_dashboard() {
-    let range = observation_range(Utc::now());
-    let store = Arc::new(FixtureObservabilityStore::new(range));
-    *store.concurrency.lock().unwrap() = Some(vec![UsageConcurrencyPoint {
-        bucket_start: range.start,
-        average_concurrency: 2.0,
-        peak_concurrency: 3,
-    }]);
-    let services = observability_services(store.clone()).await;
-    let service = services.observability();
-
-    for _ in 0..2 {
-        service
-            .dashboard_trend(range, TrendKind::Usage)
-            .await
-            .unwrap();
-        let insights = service
-            .usage_insights(range, UsageFilter::default())
-            .await
-            .unwrap();
-        assert_eq!(insights.performance.load.average_concurrency, Some(2.0));
-        assert_eq!(insights.performance.load.peak_concurrency, Some(3));
-    }
-    assert_eq!(
-        *store.concurrency_selections.lock().unwrap(),
-        vec![false, true]
-    );
-}
-
-#[tokio::test]
-async fn usage_insights_should_distinguish_unavailable_concurrency_from_empty_results() {
-    for concurrency in [None, Some(Vec::new())] {
-        let range = observation_range(Utc::now());
-        let store = Arc::new(FixtureObservabilityStore::new(range));
-        let available = concurrency.is_some();
-        *store.concurrency.lock().unwrap() = concurrency;
-        store.overview.lock().unwrap().requests.request_count = 7;
-        store.replace_trend(vec![health_metric_point(
-            range.start,
-            RequestMetrics::default(),
-        )]);
-        let insights = observability_services(store)
-            .await
-            .observability()
-            .usage_insights(range, UsageFilter::default())
-            .await
-            .unwrap();
-        assert_eq!(insights.health.total_requests, 7);
-        assert_eq!(
-            insights.performance.load.average_concurrency,
-            available.then_some(0.0)
-        );
-        assert_eq!(
-            insights.performance.load.peak_concurrency,
-            available.then_some(0)
-        );
-        assert_eq!(
-            insights.performance.points[0].load.average_concurrency,
-            available.then_some(0.0)
-        );
-        assert_eq!(
-            insights.performance.points[0].load.peak_concurrency,
-            available.then_some(0)
-        );
-    }
+    assert!((insights.performance.load.average_concurrency - 5.0 / 3.0).abs() < 1e-10);
+    assert_eq!(insights.performance.load.peak_concurrency, 4);
+    assert_eq!(insights.performance.points[0].load.average_concurrency, 1.0);
+    assert_eq!(insights.performance.points[0].load.peak_concurrency, 1);
+    assert_eq!(insights.performance.points[1].load.average_concurrency, 3.0);
+    assert_eq!(insights.performance.points[1].load.peak_concurrency, 4);
 }
 
 #[tokio::test]
@@ -1126,14 +1046,58 @@ async fn dashboard_should_preserve_provider_plan_names() {
     }
 }
 
+#[tokio::test]
+async fn dashboard_and_usage_insights_keep_concurrency_cache_entries_separate() {
+    for dashboard_first in [true, false] {
+        let now = Utc::now();
+        let range = observation_range(now);
+        let store = Arc::new(FixtureObservabilityStore::new(range));
+        store
+            .concurrency
+            .lock()
+            .unwrap()
+            .push(UsageConcurrencyPoint {
+                bucket_start: range.start,
+                average_concurrency: 2.0,
+                peak_concurrency: 3,
+            });
+        let services = observability_services(store.clone()).await;
+        for dashboard in [
+            dashboard_first,
+            !dashboard_first,
+            dashboard_first,
+            !dashboard_first,
+        ] {
+            if dashboard {
+                services
+                    .observability()
+                    .dashboard_trend(range, TrendKind::Usage)
+                    .await
+                    .unwrap();
+            } else {
+                let result = services
+                    .observability()
+                    .usage_insights(range, UsageFilter::default())
+                    .await
+                    .unwrap();
+                assert_eq!(result.performance.load.peak_concurrency, 3);
+            }
+        }
+        assert_eq!(
+            *store.concurrency_selections.lock().unwrap(),
+            vec![!dashboard_first, dashboard_first]
+        );
+    }
+}
+
 struct FixtureObservabilityStore {
     yesterday: Mutex<RequestMetrics>,
     trend: Mutex<Vec<RequestMetricPoint>>,
     overview: Mutex<UsageOverview>,
     projected_costs: Mutex<Vec<UsageProjectedCostPoint>>,
-    concurrency: Mutex<Option<Vec<UsageConcurrencyPoint>>>,
-    concurrency_selections: Mutex<Vec<bool>>,
+    concurrency: Mutex<Vec<UsageConcurrencyPoint>>,
     insights_fail: AtomicBool,
+    concurrency_selections: Mutex<Vec<bool>>,
     summary_fail: AtomicBool,
     diagnostics: Mutex<DiagnosticsObservation>,
     runtime_slots: Mutex<Option<DashboardRuntimeSlots>>,
@@ -1160,9 +1124,9 @@ impl FixtureObservabilityStore {
                 providers: Vec::new(),
             }),
             projected_costs: Mutex::new(Vec::new()),
-            concurrency: Mutex::new(Some(Vec::new())),
-            concurrency_selections: Mutex::new(Vec::new()),
+            concurrency: Mutex::new(Vec::new()),
             insights_fail: AtomicBool::new(false),
+            concurrency_selections: Mutex::new(Vec::new()),
             summary_fail: AtomicBool::new(false),
             diagnostics: Mutex::new(DiagnosticsObservation::default()),
             runtime_slots: Mutex::new(None),
@@ -1300,7 +1264,7 @@ impl ObservabilityStore for FixtureObservabilityStore {
             concurrency: if include_concurrency {
                 self.concurrency.lock().expect("concurrency").clone()
             } else {
-                None
+                Vec::new()
             },
         })
     }

@@ -1287,7 +1287,7 @@ async fn calendar_query_rejects_an_anchor_outside_the_local_calendar() {
 }
 
 #[tokio::test]
-async fn usage_insights_preserves_metrics_when_concurrency_is_unavailable() {
+async fn usage_insights_maps_load_summary_and_points_to_camel_case() {
     use crate::admin::{AdminTestFixture, AdminTestState};
     use axum::{
         body::{Body, to_bytes},
@@ -1301,97 +1301,85 @@ async fn usage_insights_preserves_metrics_when_concurrency_is_unavailable() {
     use gateway_api::admin::observability;
     use tower::ServiceExt as _;
 
-    for concurrency_available in [true, false] {
-        let fixture = AdminTestFixture::new().await;
-        fixture.auth.insert_session("valid-session");
-        let now = Utc::now();
-        let range = TimeRange::new(now - Duration::minutes(15), now).unwrap();
-        let bucket = range.start;
-        {
-            let mut observations = fixture.observations.lock().unwrap();
-            observations.summary = Some(UsageOverview {
-                analytics: Default::default(),
-                range,
-                requests: RequestMetrics {
-                    request_count: 7,
-                    admission_decision_percentiles: LatencyPercentiles {
-                        p95_ms: Some(PercentileMilliseconds::new(12.5).unwrap()),
-                        ..Default::default()
-                    },
-                    account_selection_wait_percentiles: LatencyPercentiles {
-                        p95_ms: Some(PercentileMilliseconds::new(128.75).unwrap()),
-                        ..Default::default()
-                    },
+    let fixture = AdminTestFixture::new().await;
+    fixture.auth.insert_session("valid-session");
+    let now = Utc::now();
+    let range = TimeRange::new(now - Duration::minutes(15), now).unwrap();
+    let bucket = range.start;
+    {
+        let mut observations = fixture.observations.lock().unwrap();
+        observations.summary = Some(UsageOverview {
+            analytics: Default::default(),
+            range,
+            requests: RequestMetrics {
+                admission_decision_percentiles: LatencyPercentiles {
+                    p95_ms: Some(PercentileMilliseconds::new(12.5).unwrap()),
                     ..Default::default()
                 },
-                attempts: Default::default(),
-                providers: Vec::new(),
-            });
-            observations.trend = Some(vec![RequestMetricPoint {
-                bucket_start: bucket,
-                granularity: Granularity::FifteenMinutes,
-                metrics: RequestMetrics {
-                    admission_decision_percentiles: LatencyPercentiles {
-                        p95_ms: Some(PercentileMilliseconds::new(2.5).unwrap()),
-                        ..Default::default()
-                    },
+                account_selection_wait_percentiles: LatencyPercentiles {
+                    p95_ms: Some(PercentileMilliseconds::new(128.75).unwrap()),
                     ..Default::default()
                 },
-                cost_coverage: Default::default(),
-                costs: Vec::new(),
-            }]);
-            observations.concurrency = concurrency_available.then(|| {
-                vec![UsageConcurrencyPoint {
-                    bucket_start: bucket,
-                    average_concurrency: 1.25,
-                    peak_concurrency: 3,
-                }]
-            });
-        }
-
-        let response = observability::router::<AdminTestState>()
-            .with_state(fixture.state())
-            .oneshot(
-                Request::builder()
-                    .uri("/api/admin/usage/insights/overview")
-                    .header(header::COOKIE, "cpr_session=valid-session")
-                    .header("x-request-id", "req_usage_insights_load")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        let status = response.status();
-        let body = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
-        let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(status, StatusCode::OK, "{value}");
-        assert_eq!(value["data"]["health"]["totalRequests"], 7);
-        assert_eq!(
-            fixture.observations.lock().unwrap().concurrency_requests,
-            [true]
-        );
-        let expected_average = concurrency_available.then_some(1.25);
-        let expected_peak = concurrency_available.then_some(3);
-        let performance = &value["data"]["performance"];
-        assert_eq!(
-            performance["load"],
-            json!({
-                "averageConcurrency": expected_average,
-                "peakConcurrency": expected_peak,
-                "admissionDecisionP95Ms": 12.5,
-                "accountSelectionWaitP95Ms": 128.75,
-            })
-        );
-        assert_eq!(
-            performance["points"][0]["load"],
-            json!({
-                "averageConcurrency": expected_average,
-                "peakConcurrency": expected_peak,
-                "admissionDecisionP95Ms": 2.5,
-                "accountSelectionWaitP95Ms": null,
-            })
-        );
+                ..Default::default()
+            },
+            attempts: Default::default(),
+            providers: Vec::new(),
+        });
+        observations.trend = Some(vec![RequestMetricPoint {
+            bucket_start: bucket,
+            granularity: Granularity::FifteenMinutes,
+            metrics: RequestMetrics {
+                admission_decision_percentiles: LatencyPercentiles {
+                    p95_ms: Some(PercentileMilliseconds::new(2.5).unwrap()),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            cost_coverage: Default::default(),
+            costs: Vec::new(),
+        }]);
+        observations.concurrency = vec![UsageConcurrencyPoint {
+            bucket_start: bucket,
+            average_concurrency: 1.25,
+            peak_concurrency: 3,
+        }];
     }
+
+    let response = observability::router::<AdminTestState>()
+        .with_state(fixture.state())
+        .oneshot(
+            Request::builder()
+                .uri("/api/admin/usage/insights/overview")
+                .header(header::COOKIE, "cpr_session=valid-session")
+                .header("x-request-id", "req_usage_insights_load")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = response.status();
+    let body = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+    let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(status, StatusCode::OK, "{value}");
+    let performance = &value["data"]["performance"];
+    assert_eq!(
+        performance["load"],
+        json!({
+            "averageConcurrency": 1.25,
+            "peakConcurrency": 3,
+            "admissionDecisionP95Ms": 12.5,
+            "accountSelectionWaitP95Ms": 128.75,
+        })
+    );
+    assert_eq!(
+        performance["points"][0]["load"],
+        json!({
+            "averageConcurrency": 1.25,
+            "peakConcurrency": 3,
+            "admissionDecisionP95Ms": 2.5,
+            "accountSelectionWaitP95Ms": null,
+        })
+    );
 }
 
 #[tokio::test]

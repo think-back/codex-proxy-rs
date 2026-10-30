@@ -387,7 +387,7 @@ fn build_usage_insights(
     overview: UsageOverview,
     trend: Vec<RequestMetricPoint>,
     standard_costs: UsageCostScenarios,
-    concurrency: Option<Vec<UsageConcurrencyPoint>>,
+    concurrency: Vec<UsageConcurrencyPoint>,
 ) -> Result<UsageInsights, AdminError> {
     let granularity = trend.first().map_or(
         crate::model::observability::Granularity::FifteenMinutes,
@@ -435,8 +435,6 @@ fn build_usage_insights(
             })
             .collect(),
     };
-    let concurrency_available = concurrency.is_some();
-    let concurrency = concurrency.as_deref().unwrap_or_default();
     let concurrency_by_bucket = concurrency
         .iter()
         .map(|point| (point.bucket_start, point))
@@ -470,8 +468,8 @@ fn build_usage_insights(
         output_throughput_p50: requests.output_throughput_p50,
         output_throughput_p90: requests.output_throughput_p90,
         load: UsageInsightsLoad {
-            average_concurrency: concurrency_available.then_some(average_concurrency),
-            peak_concurrency: concurrency_available.then_some(peak_concurrency),
+            average_concurrency,
+            peak_concurrency,
             admission_decision_p95_ms: requests.admission_decision_percentiles.p95_ms,
             account_selection_wait_p95_ms: requests.account_selection_wait_percentiles.p95_ms,
         },
@@ -487,10 +485,9 @@ fn build_usage_insights(
                     output_throughput_p50: point.metrics.output_throughput_p50,
                     output_throughput_p90: point.metrics.output_throughput_p90,
                     load: UsageInsightsLoad {
-                        average_concurrency: concurrency_available
-                            .then(|| concurrency.map_or(0.0, |point| point.average_concurrency)),
-                        peak_concurrency: concurrency_available
-                            .then(|| concurrency.map_or(0, |point| point.peak_concurrency)),
+                        average_concurrency: concurrency
+                            .map_or(0.0, |point| point.average_concurrency),
+                        peak_concurrency: concurrency.map_or(0, |point| point.peak_concurrency),
                         admission_decision_p95_ms: point
                             .metrics
                             .admission_decision_percentiles

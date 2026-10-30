@@ -64,6 +64,5 @@ pub struct UsageInsightsObservation {
     pub overview: UsageOverview,
     pub trend: Vec<RequestMetricPoint>,
     pub costs: Vec<UsageProjectedCostPoint>,
-    /// 未请求或无法在资源预算内精确计算时为空
-    pub concurrency: Option<Vec<UsageConcurrencyPoint>>,
+    pub concurrency: Vec<UsageConcurrencyPoint>,
 }

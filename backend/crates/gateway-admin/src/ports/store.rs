@@ -455,7 +455,8 @@ pub trait ObservabilityStore: Send + Sync {
         granularity: Granularity,
     ) -> AdminStoreResult<Vec<RequestMetricPoint>>;
 
-    /// 同一读取快照中的汇总、趋势和已投影情景费用，仅消费并发结果的入口请求并发计算
+    /// 同一读取快照中的汇总、趋势和已投影情景费用
+    /// 不需要并发时关闭 include_concurrency，返回空并发序列并跳过明细计算
     async fn usage_insights_observation(
         &self,
         range: TimeRange,
