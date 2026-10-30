@@ -1,0 +1,17 @@
+name: Bounded concurrency trend verification
+
+on:
+  push:
+    branches:
+      - verify/bounded-concurrency-trend-20261029
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    uses: ./.github/workflows/_quality.yml
+    with:
+      ref: 4779396b800ced1697641456ead5d582aeda77e7
+      run_backend: true
+      run_frontend: true
