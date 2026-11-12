@@ -1,4 +1,4 @@
-//! 预设与完整自定义 UA 的统一解析边界，身份配套头由 Provider 所有
+//! 预设、自定义身份与 Key 请求策略的统一解析边界
 
 use chrono::DateTime;
 use gateway_core::account::OpaqueProviderData;
@@ -12,7 +12,7 @@ use sha2::{Digest, Sha256};
 use super::selection::{
     ClientKind, ClientProfileError, ClientProfileSelection, VersionMode, object,
 };
-use super::{CodexWireProfile, CodexWireProfileState};
+use super::{CapacityErrorPolicy, CodexWireProfile, CodexWireProfileState};
 
 impl CodexWireProfileState {
     /// 后台模型操作没有 Client Key，按当前全局选择冻结整套身份
@@ -39,6 +39,7 @@ impl CodexWireProfileState {
 pub struct RequestProfileSelection {
     selection: ParsedSelection,
     installation_seed: Option<String>,
+    capacity_error_policy: CapacityErrorPolicy,
 }
 
 #[derive(Debug, Clone)]
@@ -87,12 +88,16 @@ enum SelectionDocument {
     },
 }
 
-pub(crate) fn inherited_identity_fields(
+pub(crate) fn inherited_profile_fields(
     document: &OpaqueProviderData,
 ) -> Result<Option<&serde_json::Map<String, Value>>, ClientProfileError> {
     let inherited = gateway_core::settings::request_profiles::inherited_fields(document);
-    if inherited.is_some_and(|fields| fields.len() != 1 || !fields.contains_key("installationSeed"))
-    {
+    if inherited.is_some_and(|fields| {
+        fields.is_empty()
+            || fields
+                .keys()
+                .any(|field| !matches!(field.as_str(), "installationSeed" | "capacityErrorPolicy"))
+    }) {
         return Err(ClientProfileError::Invalid);
     }
     Ok(inherited)
@@ -113,8 +118,12 @@ impl RequestProfileSelection {
         }
     }
 
+    pub(crate) const fn capacity_error_policy(&self) -> CapacityErrorPolicy {
+        self.capacity_error_policy
+    }
+
     pub fn parse(document: &OpaqueProviderData) -> Result<Self, ClientProfileError> {
-        let inherited = inherited_identity_fields(document)?;
+        let inherited = inherited_profile_fields(document)?;
         let mut fields = inherited
             .unwrap_or_else(|| document.expose_to_provider())
             .clone();
@@ -131,6 +140,12 @@ impl RequestProfileSelection {
             }
             Some(_) => return Err(ClientProfileError::InvalidInstallationSeed),
         };
+        let capacity_error_policy = fields
+            .remove("capacityErrorPolicy")
+            .map(serde_json::from_value)
+            .transpose()
+            .map_err(|_| ClientProfileError::Invalid)?
+            .unwrap_or_default();
         let selection = if inherited.is_some() {
             ParsedSelection::Preset(ClientProfileSelection::default())
         } else if fields.contains_key("mode") {
@@ -153,6 +168,7 @@ impl RequestProfileSelection {
         Ok(Self {
             selection,
             installation_seed,
+            capacity_error_policy,
         })
     }
 
@@ -167,10 +183,11 @@ impl RequestProfileSelection {
         profile
             .installation_seed
             .clone_from(&self.installation_seed);
+        profile.capacity_error_policy = self.capacity_error_policy;
         Ok(profile)
     }
 
-    pub(super) fn preview(
+    pub(crate) fn preview(
         &self,
         state: &CodexWireProfileState,
     ) -> Result<OpaqueProviderData, ClientProfileError> {
@@ -178,11 +195,15 @@ impl RequestProfileSelection {
             ParsedSelection::Preset(selection) => state.preview_preset_selection(selection)?,
             ParsedSelection::Custom(identity) => identity.preview(state)?,
         };
-        let Some(seed) = &self.installation_seed else {
-            return Ok(preview);
-        };
         let mut fields = preview.into_inner();
-        fields["configuration"]["installationSeed"] = Value::String(seed.clone());
+        if let Some(seed) = &self.installation_seed {
+            fields["configuration"]["installationSeed"] = Value::String(seed.clone());
+        }
+        if self.capacity_error_policy != CapacityErrorPolicy::default() {
+            fields["configuration"]["capacityErrorPolicy"] =
+                serde_json::to_value(self.capacity_error_policy)
+                    .map_err(|_| ClientProfileError::Invalid)?;
+        }
         Ok(OpaqueProviderData::new(fields))
     }
 }
@@ -278,6 +299,7 @@ impl ExactIdentity {
                 .unwrap_or_default(),
             exact_user_agent: Some(self.user_agent.clone()),
             installation_seed: None,
+            capacity_error_policy: CapacityErrorPolicy::default(),
             residency: deployment.residency,
             account_routing_override: deployment.account_routing_override,
             verified_at: DateTime::UNIX_EPOCH,

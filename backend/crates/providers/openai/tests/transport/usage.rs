@@ -899,6 +899,7 @@ fn profile() -> CodexWireProfileState {
         terminal: "xterm".to_owned(),
         exact_user_agent: None,
         installation_seed: None,
+        capacity_error_policy: Default::default(),
         residency: None,
         account_routing_override: None,
         verified_at: Utc

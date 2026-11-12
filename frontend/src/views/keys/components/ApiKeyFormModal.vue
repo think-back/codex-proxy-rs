@@ -174,6 +174,21 @@ function updatePeerSharing(key: keyof ApiKeyPeerSharing, value: boolean) {
             @update:model-value="updateForm('installationSeed', $event)"
           />
         </ZFormItem>
+
+        <ZFormItem v-if="editing" :label="t('keys.editor.rotateImmediatelyOnCapacityError')">
+          <template #label-extra>
+            <HelpPopover
+              :label="t('keys.editor.rotateImmediatelyOnCapacityError')"
+              :content="t('keys.editor.rotateImmediatelyOnCapacityErrorHelp')"
+            />
+          </template>
+          <ZSwitch
+            :model-value="form.rotateImmediatelyOnCapacityError"
+            :aria-label="t('keys.editor.rotateImmediatelyOnCapacityError')"
+            :disabled="saving"
+            @update:model-value="updateForm('rotateImmediatelyOnCapacityError', $event)"
+          />
+        </ZFormItem>
       </div>
 
       <div class="grid gap-6 sm:grid-cols-2">

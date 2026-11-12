@@ -4,7 +4,9 @@ use gateway_core::account::OpaqueProviderData;
 use provider_openai::transport::headers::build_codex_model_headers;
 use provider_openai::transport::profile::identity::RequestProfileSelection;
 use provider_openai::transport::profile::selection::ClientProfileSelection;
-use provider_openai::transport::profile::{CodexWireProfile, CodexWireProfileState};
+use provider_openai::transport::profile::{
+    CapacityErrorPolicy, CodexWireProfile, CodexWireProfileState,
+};
 use serde_json::{Value, json};
 
 fn document(value: Value) -> OpaqueProviderData {
@@ -140,4 +142,114 @@ fn preset_identity_round_trip_preserves_request_headers_and_official_preview() {
             .expose_to_provider()["versionSource"],
         "official"
     );
+}
+
+#[test]
+fn capacity_policy_defaults_preserve_existing_profile_snapshots() {
+    let profile = CodexWireProfile::default();
+    let frozen = serde_json::to_value(&profile).unwrap();
+    assert!(frozen.get("capacity_error_policy").is_none());
+    let restored: CodexWireProfile = serde_json::from_value(frozen).unwrap();
+    assert_eq!(
+        restored.capacity_error_policy,
+        CapacityErrorPolicy::RetryThenRotate
+    );
+
+    let state = CodexWireProfileState::new(profile);
+    let mut configuration = ClientProfileSelection::default()
+        .document()
+        .unwrap()
+        .into_inner();
+    for explicit_default in [false, true] {
+        if explicit_default {
+            configuration.insert("capacityErrorPolicy".to_owned(), json!("retry_then_rotate"));
+        }
+        let resolved =
+            RequestProfileSelection::parse(&OpaqueProviderData::new(configuration.clone()))
+                .unwrap()
+                .resolve(&state)
+                .unwrap();
+        assert_eq!(
+            resolved.capacity_error_policy,
+            CapacityErrorPolicy::RetryThenRotate
+        );
+    }
+}
+
+#[test]
+fn capacity_policy_survives_preset_custom_and_inherited_profiles() {
+    let state = CodexWireProfileState::new(CodexWireProfile::default());
+    for configuration in [
+        json!({"client":"cli", "platform":"linux", "versionMode":"latest", "capacityErrorPolicy":"rotate_immediately"}),
+        json!({"mode":"custom", "userAgent":"codex-tui/1.0.0", "capacityErrorPolicy":"rotate_immediately"}),
+        json!({"inherit":{"capacityErrorPolicy":"rotate_immediately"}}),
+        json!({"inherit":{"capacityErrorPolicy":"rotate_immediately", "installationSeed":"3b11bc82-c666-417d-b9ff-2a34fd040385"}}),
+    ] {
+        let configuration = document(configuration);
+        let resolved = RequestProfileSelection::parse(&configuration)
+            .unwrap()
+            .resolve(&state)
+            .unwrap();
+        assert_eq!(
+            resolved.capacity_error_policy,
+            CapacityErrorPolicy::RotateImmediately
+        );
+        let frozen: CodexWireProfile =
+            serde_json::from_value(serde_json::to_value(&resolved).unwrap()).unwrap();
+        assert_eq!(
+            frozen.capacity_error_policy,
+            CapacityErrorPolicy::RotateImmediately
+        );
+        let preview = state
+            .preview_selection(&configuration)
+            .unwrap()
+            .into_inner();
+        assert_eq!(
+            preview["configuration"]["capacityErrorPolicy"],
+            "rotate_immediately"
+        );
+        let previewed = RequestProfileSelection::parse(&document(preview["configuration"].clone()))
+            .unwrap()
+            .resolve(&state)
+            .unwrap();
+        assert_eq!(
+            previewed.capacity_error_policy,
+            CapacityErrorPolicy::RotateImmediately
+        );
+    }
+    assert_eq!(
+        state.snapshot().capacity_error_policy,
+        CapacityErrorPolicy::RetryThenRotate
+    );
+}
+
+#[test]
+fn capacity_policy_rejects_unknown_values_and_inherited_fields() {
+    for policy in [
+        json!("unknown"),
+        json!("RotateImmediately"),
+        json!(null),
+        json!(true),
+        json!(1),
+    ] {
+        for configuration in [
+            json!({"mode":"custom", "userAgent":"codex-tui/1.0.0", "capacityErrorPolicy":policy}),
+            json!({"inherit":{"capacityErrorPolicy":policy}}),
+        ] {
+            assert!(
+                RequestProfileSelection::parse(&document(configuration.clone())).is_err(),
+                "{configuration}"
+            );
+        }
+    }
+    for configuration in [
+        json!({"inherit":{}}),
+        json!({"inherit":{"capacityErrorPolicy":"rotate_immediately", "unknown":true}}),
+        json!({"inherit":{"userAgent":"codex-tui/1.0.0"}}),
+    ] {
+        assert!(
+            RequestProfileSelection::parse(&document(configuration.clone())).is_err(),
+            "{configuration}"
+        );
+    }
 }

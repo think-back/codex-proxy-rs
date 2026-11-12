@@ -1,5 +1,5 @@
 import type { ApiKey, ApiKeyPeerSharing } from '@/api'
-import type { ProviderRequestProfiles, ProviderRequestProfileUpdates } from '@/api/modules/settings/profiles'
+import type { ProviderRequestProfile, ProviderRequestProfiles, ProviderRequestProfileUpdates } from '@/api/modules/settings/profiles'
 import { cloneDeep } from 'es-toolkit'
 import { ref, shallowRef } from 'vue'
 import { createApiKey, updateApiKey } from '@/api'
@@ -7,10 +7,13 @@ import { useAsyncAction } from '@/composables/useAsyncAction'
 import { t } from '@/i18n'
 import { notification as ZNotification } from '@/utils/notification'
 
+const ROTATE_IMMEDIATELY = 'rotate_immediately'
+
 export interface ApiKeyFormValue {
   peerSharing: ApiKeyPeerSharing
   providerRequestProfileOverrides: ProviderRequestProfiles
   installationSeed: string
+  rotateImmediatelyOnCapacityError: boolean
   customKey: string
   name: string
   label: string
@@ -41,19 +44,16 @@ export function useApiKeyEditor(options: {
   function openEdit(key: ApiKey) {
     editingKey.value = key
     const profiles = cloneDeep(key.providerRequestProfileOverrides)
-    const openai = profiles.openai
-    const identity = (openai?.inherit as Record<string, unknown> | undefined) ?? openai
-    const installationSeed = typeof identity?.installationSeed === 'string'
-      ? identity.installationSeed
-      : ''
-    if (openai?.inherit)
+    const { selection, installationSeed, rotateImmediatelyOnCapacityError } = openAiKeyProfileParts(profiles.openai)
+    if (selection)
+      profiles.openai = selection
+    else
       delete profiles.openai
-    else if (openai)
-      delete openai.installationSeed
     form.value = {
       peerSharing: { ...key.peerSharing },
       providerRequestProfileOverrides: profiles,
       installationSeed,
+      rotateImmediatelyOnCapacityError,
       customKey: '',
       name: key.name,
       label: key.label ?? '',
@@ -100,16 +100,28 @@ export function useApiKeyEditor(options: {
           weeklyLimitUsd: form.value.weeklyLimitUsd.trim() || '0',
         }
         const profiles = cloneDeep(form.value.providerRequestProfileOverrides)
-        const installationSeed = form.value.installationSeed
-        if (installationSeed) {
-          // 仅设置种子时仍继承全局 UA，不在 Key 中复制当前全局值
-          profiles.openai = profiles.openai
-            ? { ...profiles.openai, installationSeed }
-            : {
-                inherit: { installationSeed },
-              }
-        }
         const current = editingKey.value
+        const { installationSeed, rotateImmediatelyOnCapacityError } = form.value
+        const keyOptions: ProviderRequestProfile = {}
+        if (installationSeed)
+          keyOptions.installationSeed = installationSeed
+        if (rotateImmediatelyOnCapacityError)
+          keyOptions.capacityErrorPolicy = ROTATE_IMMEDIATELY
+        if (profiles.openai) {
+          profiles.openai = {
+            ...profiles.openai,
+            ...keyOptions,
+          }
+        }
+        else {
+          const { inheritedOptions } = openAiKeyProfileParts(current?.providerRequestProfileOverrides.openai)
+          const inherit = {
+            ...inheritedOptions,
+            ...keyOptions,
+          }
+          if (Object.keys(inherit).length > 0)
+            profiles.openai = { inherit }
+        }
         let created: { key: string, name: string } | undefined
         if (current) {
           await updateApiKey({
@@ -175,6 +187,7 @@ function emptyForm(): ApiKeyFormValue {
     },
     providerRequestProfileOverrides: {},
     installationSeed: '',
+    rotateImmediatelyOnCapacityError: false,
     customKey: '',
     name: '',
     label: '',
@@ -183,6 +196,23 @@ function emptyForm(): ApiKeyFormValue {
     requestsPerMinute: '',
     dailyLimitUsd: '',
     weeklyLimitUsd: '',
+  }
+}
+
+function openAiKeyProfileParts(profile?: ProviderRequestProfile) {
+  const inherited = profile?.inherit as ProviderRequestProfile | undefined
+  const { installationSeed, capacityErrorPolicy, ...rest } = inherited ?? profile ?? {}
+  return {
+    selection: inherited || !profile
+      ? undefined
+      : rest,
+    inheritedOptions: inherited
+      ? rest
+      : {},
+    installationSeed: typeof installationSeed === 'string'
+      ? installationSeed
+      : '',
+    rotateImmediatelyOnCapacityError: capacityErrorPolicy === ROTATE_IMMEDIATELY,
   }
 }
 

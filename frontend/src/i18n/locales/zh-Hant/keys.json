@@ -62,6 +62,8 @@
       "customKeyOptional": "自定義 API密鑰（可選）",
       "keyPlaceholder": "留空自動生成",
       "upstreamIdentity": "上游身份",
+      "rotateImmediatelyOnCapacityError": "容量不足立即換號",
+      "rotateImmediatelyOnCapacityErrorHelp": "OpenAI 回傳容量不足時，跳過目前帳號的等待和重試，符合換號條件時直接嘗試其他帳號",
       "dailyLimit": "日限額",
       "dailyLimitUsd": "日限額（USD）",
       "weeklyLimit": "周限額",
