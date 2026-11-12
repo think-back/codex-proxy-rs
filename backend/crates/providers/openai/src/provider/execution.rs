@@ -693,7 +693,7 @@ pub(super) fn cold_json_response_stream(request: ColdJsonResponse) -> EventStrea
                 if let Some(observation) = failure.observation.take() {
                     yield ProviderEvent::observation(observation);
                 }
-                apply_failure(&failure_context, &active_account, &failure).await;
+                apply_failure(&failure_context, &active_account, &mut failure).await;
                 Err(failure.error)?;
                 return;
             }
@@ -903,7 +903,7 @@ pub(super) fn cold_response_stream(response: ColdResponse) -> EventStream {
                 if let Some(observation) = failure.observation.take() {
                     yield ProviderEvent::observation(observation);
                 }
-                apply_failure(&failure_context, &active_account, &failure)
+                apply_failure(&failure_context, &active_account, &mut failure)
                 .await;
                 Err(quota_continuation_replay_error(
                     failure.error,
@@ -915,11 +915,11 @@ pub(super) fn cold_response_stream(response: ColdResponse) -> EventStream {
         };
         context.connection_budget().complete();
         if !accepts_backend_transport(transport_policy, response.transport) {
-            let failure = MappedProviderFailure::plain(provider_error(
+            let mut failure = MappedProviderFailure::plain(provider_error(
                 ProviderErrorKind::Protocol,
                 UpstreamSendState::Sent,
             ));
-            apply_failure(&failure_context, &active_account, &failure)
+            apply_failure(&failure_context, &active_account, &mut failure)
             .await;
             Err(failure.error)?;
             return;
@@ -1107,7 +1107,7 @@ pub(super) fn cold_response_stream(response: ColdResponse) -> EventStream {
                         )
                         .await;
                     }
-                    apply_failure(&failure_context, &active_account, &failure)
+                    apply_failure(&failure_context, &active_account, &mut failure)
                     .await;
                     Err(quota_continuation_replay_error(
                         failure.error,
@@ -1149,7 +1149,7 @@ pub(super) fn cold_response_stream(response: ColdResponse) -> EventStream {
             let metadata_changed = metadata_merge.unwrap_or(false);
             let service_tier_changed = observation_state
                 .observe_upstream_service_tier(decoder.response_service_tier());
-            let terminal_failure = canonical_failure.map(|(error, semantic_output_seen)| {
+            let mut terminal_failure = canonical_failure.map(|(error, semantic_output_seen)| {
                 log_canonical_upstream_error(
                     UpstreamErrorLogContext::new(
                         &context,
@@ -1214,7 +1214,7 @@ pub(super) fn cold_response_stream(response: ColdResponse) -> EventStream {
                     "durationMs": started.elapsed().as_millis(),
                 }));
             }
-            if let Some((failure, _)) = terminal_failure.as_ref() {
+            if let Some((failure, _)) = terminal_failure.as_mut() {
                 let started = Instant::now();
                 apply_failure(&failure_context, &active_account, failure)
                 .await;
@@ -1286,7 +1286,7 @@ pub(super) fn cold_response_stream(response: ColdResponse) -> EventStream {
                 (events, Some((error, semantic_output_seen)))
             }
         };
-        let terminal_failure = canonical_failure.map(|(error, semantic_output_seen)| {
+        let mut terminal_failure = canonical_failure.map(|(error, semantic_output_seen)| {
             log_canonical_upstream_error(
                 UpstreamErrorLogContext::new(
                     &context,
@@ -1336,7 +1336,7 @@ pub(super) fn cold_response_stream(response: ColdResponse) -> EventStream {
             )
             .await;
         }
-        if let Some((failure, _)) = terminal_failure.as_ref() {
+        if let Some((failure, _)) = terminal_failure.as_mut() {
             apply_failure(&failure_context, &active_account, failure)
             .await;
         }

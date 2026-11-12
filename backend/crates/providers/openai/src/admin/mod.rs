@@ -234,6 +234,8 @@ impl ProviderAdmin for OpenAiAdminProvider {
         &self,
         configuration: &gateway_core::account::OpaqueProviderData,
     ) -> Result<gateway_core::account::OpaqueProviderData, ProviderAdminError> {
+        use crate::transport::profile::{CapacityErrorPolicy, identity::RequestProfileSelection};
+
         if configuration
             .expose_to_provider()
             .contains_key("installationSeed")
@@ -242,8 +244,14 @@ impl ProviderAdmin for OpenAiAdminProvider {
             return Err(provider_admin_error(ProviderAdminErrorKind::Invalid)
                 .with_public_message("安装身份种子只能在 API 密钥中设置"));
         }
-        self.profile
-            .preview_selection(configuration)
+        let selection =
+            RequestProfileSelection::parse(configuration).map_err(map_client_profile_error)?;
+        if selection.capacity_error_policy() != CapacityErrorPolicy::default() {
+            return Err(provider_admin_error(ProviderAdminErrorKind::Invalid)
+                .with_public_message("容量不足时立即换号只能在 API 密钥中设置"));
+        }
+        selection
+            .preview(&self.profile)
             .map_err(map_client_profile_error)
     }
 
@@ -252,7 +260,7 @@ impl ProviderAdmin for OpenAiAdminProvider {
         key: &gateway_core::account::OpaqueProviderData,
         global: Option<&gateway_core::account::OpaqueProviderData>,
     ) -> Result<gateway_core::account::OpaqueProviderData, ProviderAdminError> {
-        crate::transport::profile::identity::inherited_identity_fields(key)
+        crate::transport::profile::identity::inherited_profile_fields(key)
             .map_err(map_client_profile_error)?;
         let profile = gateway_core::settings::request_profiles::resolve_key_profile(key, global);
         self.profile

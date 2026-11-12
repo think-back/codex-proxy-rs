@@ -485,7 +485,7 @@ fn cold_live_call_stream(request: ColdLiveCall) -> EventStream {
                 if let Some(observation) = failure.observation.take() {
                     yield ProviderEvent::observation(observation);
                 }
-                apply_failure(&failure_context, &active_account, &failure).await;
+                apply_failure(&failure_context, &active_account, &mut failure).await;
                 Err(failure.error)?;
                 return;
             }

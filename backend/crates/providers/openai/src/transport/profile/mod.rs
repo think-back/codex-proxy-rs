@@ -43,6 +43,23 @@ const ARTIFACT_PROFILE_SCHEMA_VERSION: u64 = 1;
 /// 保留已有配置类型入口；位置规则由出口领域统一维护
 pub use gateway_core::account::RequestLocation as CodexRequestLocation;
 
+/// 容量错误在同账号重试与换号之间的选择
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CapacityErrorPolicy {
+    /// 遵循上游退避后重试，耗尽同账号重试预算再换号
+    #[default]
+    RetryThenRotate,
+    /// 跳过同账号等待与重试，交由 Core 判断能否安全换号
+    RotateImmediately,
+}
+
+impl CapacityErrorPolicy {
+    fn is_default(&self) -> bool {
+        *self == Self::RetryThenRotate
+    }
+}
+
 /// Codex 上游请求身份快照
 ///
 /// 预设按官方配套版本生成 UA；自定义身份保留完整 UA 及其配套请求头
@@ -72,6 +89,9 @@ pub struct CodexWireProfile {
     /// Key 的安装身份种子，仅在本地按 Key 与账号派生出站身份
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub installation_seed: Option<String>,
+    /// Key 画像冻结的容量错误策略
+    #[serde(default, skip_serializing_if = "CapacityErrorPolicy::is_default")]
+    pub capacity_error_policy: CapacityErrorPolicy,
     /// 未配置时不发送 residency 头；不随制品版本更新而改变
     pub residency: Option<String>,
     /// 部署指定的账号路由头；未配置时不发送，不随客户端身份选择改变
@@ -94,6 +114,7 @@ impl Default for CodexWireProfile {
             terminal: "unknown".to_owned(),
             exact_user_agent: None,
             installation_seed: None,
+            capacity_error_policy: CapacityErrorPolicy::default(),
             residency: None,
             account_routing_override: None,
             // 制品核验于 2026-09-06T03:26:12.084Z；进程启动不构成重新核验
@@ -227,6 +248,13 @@ impl CodexWireProfileState {
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()
+    }
+
+    pub(crate) fn capacity_error_policy(&self) -> CapacityErrorPolicy {
+        self.profile
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .capacity_error_policy
     }
 
     /// 原子发布同一 Desktop ZIP 中核验出的完整版本元组

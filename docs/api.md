@@ -804,6 +804,8 @@ OpenAI 仅在允许安全重放且尚未交付不可重放输出时执行下表�
 | `server_is_overloaded`、`slow_down` 或明确模型容量不足 | 3 次 | 500ms 起步的指数退避，单次最多 8 秒 | 按调度规则换号 |
 | 普通 `503` 且 `error.code=server_error` | 5 次 | 500ms 起步的指数退避，基准最多 2 秒，每次追加 `[50ms, 250ms)` 等待 | 返回最后一次上游错误，不因此换号 |
 
+Client Key 启用[容量不足立即换号](#key-容量错误策略)后，表中的容量拒绝直接进入换号判断，跳过同账号等待和重试。
+
 有效 `Retry-After` 优先，接受秒数、HTTP 日期和零延迟，不受本地退避上限截断，也不追加随机等待。
 流内失败事件使用相同解析规则，WS 同账号传输重试与转 HTTP 回退也遵守服务器建议；等待受请求截止时间和取消约束，
 重试受[请求总尝试次数](#账号亲和与换号)约束。
@@ -2035,6 +2037,15 @@ OpenAI Key 的 `installationSeed` 接受带连字符的 UUID，保存时规范�
 兼容字段 `openaiClientProfileOverride` 和 `xaiClientProfileOverride` 分别对应上述映射中的 `openai`、`xai`。
 创建时省略或 `null` 表示无覆盖；更新时省略保留、`null` 清除。与通用字段同时提交时必须一致，否则拒绝整个请求；
 响应中的兼容字段从同一映射派生，不是第二份配置
+
+### Key 容量错误策略
+
+在 API Key 编辑页开启「容量不足立即换号」，该 Key 收到支持重试的 OpenAI 容量拒绝时，跳过同账号退避，立即尝试在其授权范围内选择另一个账号。
+换号仍受安全重放条件和调度预算约束；无法换号时返回该次上游错误，并保留原始 `Retry-After`。
+
+API 对应字段为 `providerRequestProfileOverrides.openai` 中的 `capacityErrorPolicy`。
+默认值 `retry_then_rotate` 沿用[容量拒绝与重试](#容量拒绝与重试)的同账号策略；设为 `rotate_immediately` 启用立即换号。
+继承通用身份时使用 `{"inherit":{"capacityErrorPolicy":"rotate_immediately"}}`；独立预设或自定义身份将该字段与身份配置并列。
 
 ### 名称与密钥值
 

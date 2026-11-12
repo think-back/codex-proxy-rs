@@ -689,15 +689,20 @@ impl ProviderError {
 
     /// 保留已选择的耗尽策略，但禁止执行同账号退避和传输恢复
     ///
-    /// Provider 在上游明确拒绝继续使用当前账号时设置
+    /// Provider 根据上游拒绝或请求策略设置
     /// Core 不根据错误码自行推断
     #[must_use]
     pub const fn with_same_account_retry_blocked(mut self) -> Self {
-        self.same_account_retry_blocked = true;
+        self.block_same_account_retry();
         self
     }
 
-    /// 返回上游是否拒绝继续重试当前账号
+    /// 禁止同账号重试，保留原始错误与重放条件
+    pub const fn block_same_account_retry(&mut self) {
+        self.same_account_retry_blocked = true;
+    }
+
+    /// 返回是否禁止继续重试当前账号
     #[must_use]
     pub const fn same_account_retry_blocked(&self) -> bool {
         self.same_account_retry_blocked

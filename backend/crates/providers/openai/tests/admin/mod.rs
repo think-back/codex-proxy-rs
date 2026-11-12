@@ -230,6 +230,46 @@ async fn installation_seed_is_optional_and_validated_only_for_key_profiles() {
 }
 
 #[tokio::test]
+async fn capacity_rotation_is_key_only_and_preserves_inherited_identity() {
+    let bundle = provider_openai::initialize(
+        valid_config().config,
+        provider_ports(),
+        Arc::new(gateway_core::account::UpstreamInfoReader::default()),
+    )
+    .await
+    .unwrap();
+    let provider = bundle.admin_provider();
+    let doc = |value: Value| OpaqueProviderData::new(value.as_object().unwrap().clone());
+    let global = doc(json!({"mode":"custom", "userAgent":"codex-tui/2.0.0"}));
+    for key in [
+        json!({"mode":"custom", "userAgent":"codex-tui/2.0.0", "capacityErrorPolicy":"rotate_immediately"}),
+        json!({"inherit":{"capacityErrorPolicy":"rotate_immediately"}}),
+        json!({"inherit":{"capacityErrorPolicy":"rotate_immediately", "installationSeed":"3b11bc82-c666-417d-b9ff-2a34fd040385"}}),
+    ] {
+        let key = doc(key);
+        let preview = provider
+            .preview_key_client_profile(&key, Some(&global))
+            .unwrap()
+            .into_inner();
+        assert_eq!(preview["userAgent"], "codex-tui/2.0.0");
+        assert_eq!(
+            preview["configuration"]["capacityErrorPolicy"],
+            "rotate_immediately"
+        );
+        assert!(provider.preview_client_profile(&key).is_err());
+    }
+    let explicit_default = doc(
+        json!({"mode":"custom", "userAgent":"codex-tui/2.0.0", "capacityErrorPolicy":"retry_then_rotate"}),
+    );
+    assert!(provider.preview_client_profile(&explicit_default).is_ok());
+    assert!(
+        provider
+            .preview_key_client_profile(&explicit_default, None)
+            .is_ok()
+    );
+}
+
+#[tokio::test]
 async fn openai_bundle_exposes_one_core_provider_and_drains_worker_contributions_once() {
     let config = valid_config();
     let mut bundle = provider_openai::initialize(

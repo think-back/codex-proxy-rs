@@ -1,6 +1,7 @@
 //! OpenAI 上游失败分类、恢复决策与稳定错误投影
 
 use super::*;
+use crate::transport::profile::CapacityErrorPolicy;
 use crate::transport::protocol::responses::is_replaceable_response_prelude;
 use gateway_core::error::{ProxyConnectionHint, TransientRetryPolicy};
 
@@ -307,8 +308,15 @@ pub(super) fn log_upstream_error_summary(
 pub(super) async fn apply_failure(
     context: &OpenAiFailureContext<'_>,
     account: &ProviderAccount,
-    failure: &MappedProviderFailure,
+    failure: &mut MappedProviderFailure,
 ) {
+    if failure.error.kind() == ProviderErrorKind::UpstreamCapacityUnavailable
+        && context.client.profile_state().capacity_error_policy()
+            == CapacityErrorPolicy::RotateImmediately
+    {
+        // Key 请求画像只禁止同账号等待；重放边界与换号预算仍由 Core 校验
+        failure.error.block_same_account_retry();
+    }
     if !context.allows_account_state_mutation {
         return;
     }

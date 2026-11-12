@@ -53,8 +53,8 @@ pub(super) fn cold_messages_stream(mut request: ColdMessages) -> EventStream {
                 match response {
                     Ok(response) => Ok(response),
                     Err(error) => {
-                        let failure = map_client_error(error, UpstreamSendState::Sent, None);
-                        apply_failure(&failure_context, request.lease.account(), &failure).await;
+                        let mut failure = map_client_error(error, UpstreamSendState::Sent, None);
+                        apply_failure(&failure_context, request.lease.account(), &mut failure).await;
                         Err(failure.error)
                     }
                 }

@@ -278,6 +278,7 @@ impl ClientProfileSelection {
                 .unwrap_or_else(|| "unknown".to_owned()),
             exact_user_agent: None,
             installation_seed: None,
+            capacity_error_policy: super::CapacityErrorPolicy::default(),
             residency: deployment.residency,
             account_routing_override: deployment.account_routing_override,
             verified_at: release.verified_at.unwrap_or(DateTime::UNIX_EPOCH),

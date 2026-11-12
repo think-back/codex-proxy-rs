@@ -1117,6 +1117,7 @@ fn wire_profile() -> CodexWireProfileState {
         terminal: "provider-contract".to_owned(),
         exact_user_agent: None,
         installation_seed: None,
+        capacity_error_policy: Default::default(),
         residency: None,
         account_routing_override: None,
         verified_at: Utc::now(),

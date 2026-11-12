@@ -62,6 +62,8 @@
       "customKeyOptional": "Custom Key (optional)",
       "keyPlaceholder": "Leave blank to generate a key",
       "upstreamIdentity": "Upstream identity",
+      "rotateImmediatelyOnCapacityError": "Switch accounts immediately on capacity errors",
+      "rotateImmediatelyOnCapacityErrorHelp": "When OpenAI reports insufficient capacity, skip waiting and retrying on the current account and try another account when eligible",
       "dailyLimit": "Daily limit",
       "dailyLimitUsd": "Daily limit (USD)",
       "weeklyLimit": "Weekly limit",

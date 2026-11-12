@@ -588,3 +588,159 @@ async fn upstream_no_more_retry_blocks_same_account_recovery_for_a_short_retry_a
         server.verify().await;
     }
 }
+
+#[tokio::test]
+async fn key_capacity_rotation_skips_same_account_wait_and_preserves_replay_boundary() {
+    let store = Arc::new(MemoryAccountStore::default());
+    let account = "acct_provider_contract";
+    create_account(&store, account).await;
+    let server = MockServer::start().await;
+    let provider = provider_with_base_url(&store, server.uri());
+    let profile = provider
+        .resolve_request_profile(&OpaqueProviderData::new(Map::from_iter([(
+            "inherit".to_owned(),
+            json!({"capacityErrorPolicy": "rotate_immediately"}),
+        )])))
+        .expect("key capacity policy");
+    let opening = json!({"error": overload_event(false)["error"].clone()});
+    let mut opening_without_delay = opening.clone();
+    opening_without_delay["error"]
+        .as_object_mut()
+        .unwrap()
+        .remove("headers");
+    let overload = format!("event: error\ndata: {}\n\n", overload_event(false));
+    let semantic = concat!(
+        "event: response.output_text.delta\n",
+        "data: {\"type\":\"response.output_text.delta\",\"response_id\":\"resp_capacity\",",
+        "\"item_id\":\"msg_capacity\",\"output_index\":0,\"content_index\":0,\"delta\":\"hello\"}\n\n"
+    );
+    let capacity = ProviderErrorKind::UpstreamCapacityUnavailable;
+    let cases = [
+        (
+            false,
+            503,
+            opening_without_delay.to_string(),
+            capacity,
+            None,
+            true,
+        ),
+        (true, 503, opening.to_string(), capacity, Some(30), true),
+        (false, 200, overload.clone(), capacity, Some(30), true),
+        (
+            false,
+            200,
+            format!("{semantic}{overload}"),
+            capacity,
+            Some(30),
+            false,
+        ),
+        (
+            false,
+            503,
+            json!({"error":{"code":"server_error","type":"server_error","message":"retry later"}})
+                .to_string(),
+            ProviderErrorKind::Unavailable,
+            None,
+            true,
+        ),
+    ];
+    for (websocket, status, body, kind, delay, replayable) in cases {
+        let mime = if status == 200 {
+            "text/event-stream"
+        } else {
+            "application/json"
+        };
+        let mut response = ResponseTemplate::new(status).set_body_raw(body.clone(), mime);
+        if status != 200 && delay.is_some() {
+            response = response.insert_header("retry-after", "30");
+        }
+        let mounted = Mock::given(method(if websocket { "GET" } else { "POST" }))
+            .and(path("/codex/responses"))
+            .respond_with(response)
+            .expect(3)
+            .mount_as_scoped(&server)
+            .await;
+        for (rotate, freeze_recovery) in [(true, false), (false, false), (true, true)] {
+            let operation = if websocket {
+                capacity_websocket_operation()
+            } else {
+                http_generate_operation()
+            };
+            let request = RequestAttemptContext::new(
+                ModelRequestId::new("req_key_capacity_policy").unwrap(),
+                ClientApiKeyId::new(if rotate { "key_rotate" } else { "key_default" }).unwrap(),
+            )
+            .with_request_location(Some(global_request_location()))
+            .with_request_profile(rotate.then(|| profile.clone()));
+            let selection = if freeze_recovery {
+                AccountAttemptContext::diagnostic(
+                    BTreeSet::new(),
+                    AccountProbeTarget::FreezeRecovery(ProviderAccountId::new(account).unwrap()),
+                    None,
+                )
+            } else {
+                AccountAttemptContext::new(BTreeSet::new(), None, None)
+                    .with_account_scope(contract_account_scope())
+            };
+            let attempt = AttemptContext::new(
+                request,
+                NonZeroU32::new(1).unwrap(),
+                SystemTime::now() + Duration::from_secs(30),
+                account_policy(),
+                selection,
+                None,
+                CancellationToken::new(),
+            );
+            let mut stream = Arc::clone(&provider)
+                .execute(planned_request("openai", operation), attempt)
+                .await
+                .expect("prepare capacity request");
+            let (mut events, mut error) = stream_failure(&mut stream).await;
+            assert_eq!(error.kind(), kind);
+            assert_eq!(error.retry_after(), delay.map(Duration::from_secs));
+            assert_eq!(
+                error.same_account_retry_blocked(),
+                rotate && kind == capacity
+            );
+            assert_eq!(error.replay_is_safe(), replayable);
+            assert_eq!(error.pre_delivery_retry().is_some(), replayable);
+            if replayable {
+                let expected = if kind == capacity {
+                    TransientRetryPolicy::RetryThenRotateAccount
+                } else {
+                    TransientRetryPolicy::RetryThenReturnError
+                };
+                assert!(matches!(
+                    error.pre_delivery_retry(),
+                    Some(PreDeliveryRetry::SameAccountTransientRetry { policy, .. })
+                        if policy == expected
+                ));
+            }
+            if status != 200 {
+                assert_eq!(
+                    error
+                        .client_visible_upstream_response()
+                        .unwrap()
+                        .body()
+                        .as_ref(),
+                    body.as_bytes()
+                );
+            }
+            if !replayable {
+                assert!(events.iter().any(|event| {
+                    event
+                        .wire_event()
+                        .is_some_and(|wire| wire.event_type() == Some("response.output_text.delta"))
+                }));
+            }
+            if status == 200 {
+                events.extend(error.take_atomic_client_events());
+                assert_eq!(
+                    events.last().unwrap().wire_event().unwrap().data(),
+                    &overload_event(false)
+                );
+            }
+        }
+        drop(mounted);
+    }
+}
