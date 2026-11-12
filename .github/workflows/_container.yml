@@ -41,6 +41,8 @@ jobs:
           ref: ${{ inputs.ref }}
       - id: toolchains
         run: ruby .github/scripts/toolchains.rb >> "$GITHUB_OUTPUT"
+      - name: Set deployment build timestamp
+        run: printf 'CPR_BUILD_TIME=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_ENV"
       - uses: ./.github/actions/build-binary
         with:
           rust: ${{ steps.toolchains.outputs.rust }}
@@ -48,7 +50,9 @@ jobs:
           platform: linux-amd64
           rust-image: ${{ steps.toolchains.outputs.rust_image }}
         env:
+          CPR_VERSION: '3.45.2'
           CPR_GIT_SHA: ${{ inputs.ref }}
+          CPR_BUILD_TYPE: source
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: codex-proxy-rs-linux-amd64
@@ -143,6 +147,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          test "$(docker run --rm --network none "$CPR_IMAGE" /app/bin/codex-proxy-rs --version)" = '3.45.2'
           mkdir -p deployment-image
           docker image inspect --format '{{.Id}}' "$CPR_IMAGE" > deployment-image/image-id.txt
           docker save "$CPR_IMAGE" | gzip -1 > deployment-image/runtime.tar.gz
