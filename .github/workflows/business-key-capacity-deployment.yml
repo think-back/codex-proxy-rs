@@ -1,0 +1,26 @@
+name: Build client key capacity deployment
+
+on:
+  push:
+    branches:
+      - deploy/business-key-capacity-20261112
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    uses: ./.github/workflows/_quality.yml
+    with:
+      ref: fd32ba390c55e62456b1847b8479ab8751a610ce
+      run_backend: true
+      run_frontend: false
+
+  container:
+    permissions:
+      contents: read
+      security-events: write
+    uses: ./.github/workflows/_container.yml
+    with:
+      ref: fd32ba390c55e62456b1847b8479ab8751a610ce
+      source_build: false
