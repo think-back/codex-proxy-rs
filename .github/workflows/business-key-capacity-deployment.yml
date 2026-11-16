@@ -1,0 +1,19 @@
+name: Build client key capacity deployment
+
+on:
+  push:
+    branches:
+      - deploy/business-key-capacity-3.50.0
+
+permissions:
+  contents: read
+
+jobs:
+  container:
+    permissions:
+      contents: read
+      security-events: write
+    uses: ./.github/workflows/_container.yml
+    with:
+      ref: 4b298c3e885e3dc2a1fa7c52a74ff5623d48fa9f
+      source_build: false
